@@ -1133,7 +1133,28 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
         var tr = b.closest("tr"), nm = tr.querySelector(".mem-n").value.replace(/\s+/g, " ").trim().slice(0, 80); b.disabled = true;
         F.updateDoc(F.doc(db, "users", tr.getAttribute("data-uid")), { shooterName: nm, shooterLinkedBy: String(ME.prof ? ME.prof.first + " " + ME.prof.last : "admin").slice(0, 79), shooterLinkedAt: new Date().toISOString() })
           .then(showAdmin, function(er){ uiAlert("Could not save: " + (er && er.message || er)); b.disabled = false; }); }; });
+      showRoAdmin();
     }).catch(fail);
+  }
+  /* RO logins (ros/{uid}): username + password accounts for range officers, created on the RO's own phone (Scoring app → Match → RO login),
+     activated / deactivated / renamed here. Deactivating blocks all live-sync writes at once (firestore.rules); also disable the user in the
+     Firebase console (Authentication → Users) so the login cannot sign in again. */
+  function showRoAdmin(){
+    var box = document.createElement("div"); box.className = "card"; box.id = "roAdm"; box.innerHTML = "Loading RO logins…"; app.appendChild(box);
+    F.getDocs(F.collection(db, "ros")).then(function(q){
+      var rs = q.docs.map(function(d){ var x = d.data(); x.uid = d.id; return x; }).sort(function(a, b){ return (a.active === b.active ? 0 : a.active ? -1 : 1) || String(a.name).localeCompare(String(b.name)); });
+      box.innerHTML = '<h3>RO logins</h3><p class="small muted">Range officers create their login in the Scoring app (Match → RO login → Create RO login on this phone). Activate only the ROs you expect. Deactivate stops that login scoring at once; also disable the user in the Firebase console (Authentication → Users, the address shown here). Scores already entered stay.</p>' +
+        (rs.length ? '<table class="mem" id="roTbl"><tr><th>Name</th><th>Username</th><th>Phone</th><th>Created</th><th>Status</th><th></th></tr>' + rs.map(function(r){
+          return '<tr data-uid="' + e(r.uid) + '"><td><input class="ro-n" value="' + e(r.name || "") + '" maxlength="60" style="width:10em"> <button type="button" class="slim ro-rn">Rename</button></td><td>' + e(r.user || "") + '<br><span class="small muted">' + e((r.user || "") + "@ro.spectre.local") + '</span></td><td>' + e(r.deviceName || "") + '</td><td>' + e(String(r.createdAt || "").slice(0, 10)) + '</td><td>' + (r.active ? '<span class="chip ok">Active</span>' : '<span class="chip warn">' + (r.activatedAt ? "Deactivated" : "Waiting") + '</span>') + '</td><td><button type="button" class="slim ro-a" data-a="' + (r.active ? 0 : 1) + '">' + (r.active ? "Deactivate" : "Activate") + '</button></td></tr>'; }).join("") + '</table>' : '<p class="small muted">No RO logins yet.</p>');
+      var by = String(ME.prof ? ME.prof.first + " " + ME.prof.last : ME.user.email).slice(0, 79);
+      Array.prototype.forEach.call(box.querySelectorAll(".ro-a"), function(b){ b.onclick = function(){
+        var tr = b.closest("tr"), on = b.getAttribute("data-a") === "1", nm = tr.querySelector(".ro-n").value;
+        (on ? Promise.resolve(true) : uiConfirm("Deactivate RO login " + nm + "? It can no longer score or sync. Also disable this user in the Firebase console.", { ok: "Deactivate", danger: true })).then(function(ok){ if(!ok) return; b.disabled = true;
+          return F.updateDoc(F.doc(db, "ros", tr.getAttribute("data-uid")), { active: on, activatedAt: new Date().toISOString(), activatedBy: by }).then(showAdmin); }).catch(function(er){ uiAlert("Could not save: " + (er && er.message || er)); b.disabled = false; }); }; });
+      Array.prototype.forEach.call(box.querySelectorAll(".ro-rn"), function(b){ b.onclick = function(){
+        var tr = b.closest("tr"), nm = tr.querySelector(".ro-n").value.replace(/\s+/g, " ").trim().slice(0, 60); if(!nm) return; b.disabled = true;
+        F.updateDoc(F.doc(db, "ros", tr.getAttribute("data-uid")), { name: nm }).then(showAdmin, function(er){ uiAlert("Could not save: " + (er && er.message || er)); b.disabled = false; }); }; });
+    }).catch(function(er){ box.innerHTML = '<h3>RO logins</h3><p class="small">Could not load RO logins: ' + e(er && er.message || er) + ' (are the new firestore.rules published?)</p>'; });
   }
   function hash(){ var o = {}; location.hash.replace(/^#/, "").split("&").forEach(function(p){ var kv = p.split("="); if(kv[0]) o[kv[0]] = decodeURIComponent(kv[1] || ""); }); return o; }
   function go(h){ location.hash = h; }

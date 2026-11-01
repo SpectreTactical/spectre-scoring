@@ -1591,7 +1591,7 @@ function loadUndo(){ try{ UNDO = JSON.parse(localStorage.getItem(SS_UNDO_KEY) ||
 function saveUndo(){ try{ localStorage.setItem(SS_UNDO_KEY, JSON.stringify(UNDO.slice(-30))); }catch(e){} }
 function commitScore(sc, note){
   var old = S.scores[sc.key] || null, c = clone(sc);
-  c.device = S.device.name; c.deviceId = S.device.id; c.at = nowISO(); c.by = officerName(); c.byRo = S.role === "ro" ? (S.device.roId || "") : "";
+  c.device = S.device.name; c.deviceId = S.device.id; c.at = nowISO(); c.by = officerName(); c.byRo = S.role === "ro" ? (S.device.roId || "") : ""; if(typeof acctOn === "function" && acctOn()){ c.acct = ACCT.uid; c.acctName = ACCT.name; } else { delete c.acct; delete c.acctName; }
   if(old){
     if(!note || !String(note).trim()) throw new Error("Editing a saved score needs a short note for the audit trail.");
     var prev = clone(old); delete prev.history;
@@ -1764,6 +1764,11 @@ function cnt(x, k){ return !x || x.noCounts || x[k] == null ? "–" : x[k]; }
 /* ---------------- CSV export ---------------- */
 function csvCell(v){ v = v == null ? "" : String(v); if(/^[=+\-@\t\r]/.test(v) && !/^[+\-]?\d+([.,]\d+)?( s| pts)?$/.test(v)) v = "'" + v; /* spreadsheet formula injection */ return /[",;\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 function csvRows(rows){ return rows.map(function(r){ return r.map(csvCell).join(","); }).join("\r\n") + "\r\n"; }
+/* CSV "Notes" cell: the score's footnote (Match tab notes) plus each edit reason from the score's audit history */
+function csvScoreNotes(st, r){ var out = [], n = typeof scoreNote === "function" ? scoreNote(st.id, r.sh.id) : "";
+  if(n) out.push(n);
+  (r.sc.history || []).forEach(function(h){ if(h && h.note) out.push("Edited " + (h.at ? fmtWhen(h.at) : "") + ": " + String(h.note).trim()); });
+  return out.join(" | "); }
 function resultsCSV(){
   var rows = [["Spectre Scoring – " + S.match.name + " – " + S.match.date + " – " + S.match.venue], ["Match Director: " + S.match.md, "Scoring model: " + (matchModel() || "–"), "Open ranking (all competitors)"], []];
   overallViews().forEach(function(v){
@@ -1780,10 +1785,10 @@ function resultsCSV(){
     var sr = stageResults(st);
     if(sr.cancelled){ rows.push(["STAGE " + st.no + " – " + st.title, "CANCELLED – not counted"]); rows.push([]); return; }
     rows.push(["STAGE " + st.no + " – " + st.title, st.division + " · " + MODELS[st.scoring].n + " model · " + "open ranking" + " · " + stageTotal(st).rounds + " rounds"]);
-    rows.push(["Rank", "Shooter", "Class", "Time (s)", "HZ", "PZI", "PZII", "Misses", "Steel standing", "Not engaged", "No-shoot hits", "Penalties", "Cover (imp/good)", "Hits (LR)", "Shots (LR)", "Stage score", "Status", "Signed", "Scored by", "Scored at", "Scored on (phone)", "Edits"]);
+    rows.push(["Rank", "Shooter", "Class", "Time (s)", "HZ", "PZI", "PZII", "Misses", "Steel standing", "Not engaged", "No-shoot hits", "Penalties", "Cover (imp/good)", "Hits (LR)", "Shots (LR)", "Stage score", "Status", "Signed", "Scored by", "Scored at", "Scored on (phone)", "Notes"]);
     sr.groups.forEach(function(g){
       g.rows.concat(g.other).forEach(function(r){ var x = r.res;
-        rows.push([r.place || "", shName(r.sh), divsText(r.sh), r.sc.time != null ? f2(r.sc.time) : "", cnt(x, "hz"), cnt(x, "pz1"), cnt(x, "pz2"), cnt(x, "miss"), cnt(x, "standing"), cnt(x, "fte"), cnt(x, "ns"), cnt(x, "pen"), x.noCounts ? "–" : (x.coverImp || 0) + "/" + (x.coverGood || 0), x.hits != null ? x.hits : "", x.shots != null ? x.shots : "", scoreText(st, x), r.why || (r.dqLater ? "DQ later in the match" : ""), r.sc.signed ? "yes" : "no", scoredByOf(r.sc).name, r.sc.at ? fmtWhen(r.sc.at) : "", r.sc.device || "", (r.sc.history || []).length]); });
+        rows.push([r.place || "", shName(r.sh), divsText(r.sh), r.sc.time != null ? f2(r.sc.time) : "", cnt(x, "hz"), cnt(x, "pz1"), cnt(x, "pz2"), cnt(x, "miss"), cnt(x, "standing"), cnt(x, "fte"), cnt(x, "ns"), cnt(x, "pen"), x.noCounts ? "–" : (x.coverImp || 0) + "/" + (x.coverGood || 0), x.hits != null ? x.hits : "", x.shots != null ? x.shots : "", scoreText(st, x), r.why || (r.dqLater ? "DQ later in the match" : ""), r.sc.signed ? "yes" : "no", scoredByOf(r.sc).name, r.sc.at ? fmtWhen(r.sc.at) : "", r.sc.device || "", csvScoreNotes(st, r)]); });
     });
     rows.push([]);
   });
@@ -2049,6 +2054,11 @@ function ctrRow(path, label, val, opt){
     '<button type="button" data-dec="' + path + '" aria-label="minus ' + esc(label) + '">−</button><span class="val" data-val="' + path + '">' + val + '</span><button type="button" data-inc="' + path + '" aria-label="plus ' + esc(label) + '">+</button>') + '</div>';
 }
 function parseTime(v){ return parseTimeStrict(v); }
+/* time inputs: never more than 2 decimals. Trimmed on every input event (typing, paste, autofill) – works on Android/Brave
+   where keydown gives keyCode 229 and beforeinput is unreliable. Returns true when something was cut. */
+var TIME_DEC_MSG = "Use at most 2 decimals, e.g. 13.51";
+function timeClampStr(v){ var m = /^([^.,]*[.,]\d{2})\d+(.*)$/.exec(String(v)); return m ? m[1] + m[2].replace(/\d/g, "") : null; }
+function timeClamp(el){ var c = timeClampStr(el.value); if(c === null) return false; var pos = el.selectionStart; el.value = c; try{ el.setSelectionRange(Math.min(pos, c.length), Math.min(pos, c.length)); }catch(e){} return true; }
 /* shooter imports with a duplicate-name check: warns and lets the user keep both (distinct shooters) or skip */
 function addShootersAsk(list){
   var groups = dupShooterGroups(list);
@@ -2066,7 +2076,7 @@ function renderEntry(){
   if(sc.dq) h += '<div class="msg bad">DISQUALIFIED' + (sc.dqReason ? ": " + esc(sc.dqReason) : "") + ' – the DQ applies to the whole match; the shooter is not ranked (§4.6, p.73).</div><button type="button" class="wide" data-act="undq">Remove DQ</button>';
   else if(sc.dnf) h += '<div class="msg warn">DID NOT FINISH this stage – no stage score; not ranked overall.</div><button type="button" class="wide" data-act="undnf">Remove DNF</button>';
   else {
-    if(model !== "qs") h += '<div class="card timebox"><label for="tTime">Time (seconds, 2 decimals)' + (model === "positive" ? " – for par time and ties" : "") + '</label><input id="tTime" inputmode="decimal" autocomplete="off" placeholder="0.00" value="' + (sc.time != null ? f2(sc.time) : "") + '"><div id="tTimeErr" class="msg bad small" hidden></div>' + (st.parTime ? '<div class="small muted">Par time ' + st.parTime + ' s</div>' : "") + '</div>';
+    if(model !== "qs") h += '<div class="card timebox"><label for="tTime">Time (seconds, 2 decimals)' + (model === "positive" ? " – for par time and ties" : "") + '</label><input id="tTime" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="0.00" value="' + (sc.time != null ? f2(sc.time) : "") + '"><div id="tTimeErr" class="msg bad small" hidden></div>' + (st.parTime ? '<div class="small muted">Par time ' + st.parTime + ' s</div>' : "") + '</div>';
     if(model === "qs") h += '<div class="card"><h3>Qualification standard</h3><p class="small muted">' + esc(st.qualStd || "Score per the briefed qualification standard (§3.3).") + '</p><div class="seg"><button type="button" data-qs="pass" class="' + (sc.qs.pass === true ? "ok" : "") + '">PASS</button><button type="button" data-qs="fail" class="' + (sc.qs.pass === false ? "danger on" : "") + '">FAIL</button></div><label for="qsPts">Score (optional)</label><input id="qsPts" inputmode="decimal" value="' + (sc.qs.pts != null ? sc.qs.pts : "") + '"></div>';
     else stageTargets(st).forEach(function(t){ h += targetCard(st, sc, t, res); });
     if(model === "negative" || model === "positive"){
@@ -2080,7 +2090,7 @@ function renderEntry(){
   if(!sc.dq) h += '<div class="endrow"><button type="button" class="wide" data-act="dnf"' + (sc.dnf ? " disabled" : "") + '>DNF – did not finish this stage…</button><div class="dqsep"><span>Match disqualification</span></div><button type="button" class="wide danger" data-act="dq">DQ…</button></div>';
   h += liveBar(st, res, "Review ›", "review");
   view().innerHTML = h;
-  var ti = $("tTime"); if(ti) ti.oninput = function(){ var v = parseTime(ti.value), te = $("tTimeErr"); U.draft.time = (v === null || isNaN(v)) ? null : v; if(te){ var bad = isNaN(v) && !/^\d+[.,]$/.test(ti.value); te.hidden = !bad; te.textContent = bad ? TIME_RULE : ""; } saveDraft(); updateLive(); };
+  var ti = $("tTime"); if(ti) ti.oninput = function(){ var cut = timeClamp(ti); var v = parseTime(ti.value), te = $("tTimeErr"); U.draft.time = (v === null || isNaN(v)) ? null : v; if(te){ var bad = isNaN(v) && !/^\d+[.,]$/.test(ti.value); te.hidden = !bad && !cut; te.textContent = cut ? TIME_DEC_MSG : bad ? TIME_RULE : ""; } saveDraft(); updateLive(); };
   var qp = $("qsPts"); if(qp) qp.oninput = function(){ var v = parsePts(qp.value); U.draft.qs.pts = (v === null || isNaN(v)) ? null : v; saveDraft(); updateLive(); };
 }
 function liveBar(st, res, btn, act){
@@ -2122,7 +2132,7 @@ function goReview(){
 function renderConfirm(){
   var st = stageById(U.stage), sh = shooterById(U.shooter), sc = U.draft, res = calcScore(st, sc), h = "";
   h += '<div class="ehead"><div class="row"><button type="button" class="slim" data-act="toentry">‹ Edit</button><div class="grow"><div class="who">Confirm – ' + esc(shName(sh)) + '</div><div class="small muted">Stage ' + st.no + ' – ' + esc(st.title) + '</div></div></div></div>';
-  h += '<div class="card" style="text-align:center"><div class="small muted">Stage score</div><div style="font-size:2.4em;font-weight:900" id="confScore">' + esc(scoreText(st, res)) + '</div>' + (res.model === "negative" && !res.dnf && !res.dq ? '<div class="small">Time ' + f2(sc.time) + ' s + ' + f2(res.added) + ' s added</div>' : "") + '</div>';
+  h += '<div class="card" style="text-align:center"><div class="small muted">Stage score</div><div style="font-size:2.4em;font-weight:900" id="confScore">' + esc(scoreText(st, res)) + '</div>' + (res.model === "negative" && !res.dnf && !res.dq ? confBreakdown(sc, res) : "") + '</div>';
   if(res.lines.length) h += '<div class="card"><ul class="breakdown">' + res.lines.map(function(l){ return "<li>" + esc(l) + "</li>"; }).join("") + '</ul>';
   if(!res.dq && !res.dnf && res.model !== "qs") h += '<table class="rtable" style="margin-top:8px"><tr><th>Target</th><th class="n">HZ</th><th class="n">PZI</th><th class="n">PZII</th><th class="n">Miss</th></tr>' + stageTargets(st).map(function(t){ var r = res.targets[t.id] || {}; return '<tr><td>' + esc(t.label) + (r.fte ? " (not engaged)" : r.standing ? " (standing)" : "") + '</td><td class="n">' + (r.hz != null ? r.hz : r.hits) + '</td><td class="n">' + (r.pz1 != null ? r.pz1 : "") + '</td><td class="n">' + (r.pz2 != null ? r.pz2 : "") + '</td><td class="n">' + (r.miss != null ? r.miss : r.shots + " shots") + '</td></tr>'; }).join("") + '</table>';
   if(res.lines.length) h += '</div>';
@@ -2148,6 +2158,9 @@ function sigPad(cv){
 }
 /* small PNG (max 360 px wide) so signatures stay light */
 function sigExport(cv){ var w = Math.min(360, cv.width), h = Math.round(cv.height * w / cv.width), c = document.createElement("canvas"); c.width = w; c.height = h; var g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, w, h); g.drawImage(cv, 0, 0, w, h); return c.toDataURL("image/png"); }
+/* confirm screen: time, then penalties and cover bonus on their own lines */
+function confBreakdown(sc, res){ var cov = (res.coverImp || 0) * 1 + (res.coverGood || 0) * 2, pen = r2((res.added || 0) + cov);
+  return '<div class="small" id="confBreak">Time ' + f2(sc.time) + ' s' + (pen ? '<br>+ ' + f2(pen) + ' s penalties' : '') + (cov ? '<br>\u2212 ' + f2(cov) + ' s cover bonus' : '') + '</div>'; }
 function saveScore(){
   var st = stageById(U.stage);
   if(!U.agree){ alertMsg("Tick “Shooter agrees with this score” first (the shooter’s sign-off)."); return; }
@@ -2303,7 +2316,7 @@ function renderMatch(){
     var n = Object.keys(S.scores).length;
     h += '<div class="card"><h3>Send scores to the main phone</h3><p class="small">' + n + ' score(s) on this phone. Send the whole set every time – the main phone skips the ones it already has.</p><div class="grid2"><button type="button" class="primary" data-act="scorespack"' + (n ? "" : " disabled") + '>Share file</button><button type="button" data-act="scoresqr"' + (n ? "" : " disabled") + '>Show QR</button></div></div>';
   }
-  h += syncCard();
+  h += syncCard() + acctCard();
   if(!ro) h += rolesCard() + archiveCard();
   h += regCard();
   h += '<div class="card"><h3>Backup</h3>' + dpCardHTML() + cbCardHTML() + '<div class="grid2" style="margin-top:8px"><button type="button" data-act="backup">Save backup file</button><button type="button" data-act="import">Restore…</button></div><p class="small muted">The backup holds everything (match, stages, shooters, scores, signatures, audit trail). Keep one after each stage. Restore… reads a backup file back in (on this or another phone).</p></div>';
@@ -2319,7 +2332,7 @@ function renderMatch(){
   bind("mMd", function(){ S.match.md = this.value; saveState(); }); bind("mVenue", function(){ S.match.venue = this.value; saveState(); });
   bind("mScorer", function(){ S.match.scorer = this.value.trim(); saveState(); }); bind("mVenueTag", function(){ S.match.venueTag = this.value.trim(); saveState(); });
   bind("devName", function(){ S.device.name = this.value.trim(); saveState(); render(); });
-  syncBind(); regBind(); rolesBind(); archiveBind(); notesBind();
+  syncBind(); acctBind(); regBind(); rolesBind(); archiveBind(); notesBind();
   bind("pDark", function(){ PREFS.dark = this.checked; savePrefs(); render(); }); bind("pBig", function(){ PREFS.big = this.checked; savePrefs(); render(); }); bind("pNext", function(){ PREFS.autoNext = this.checked; savePrefs(); render(); });
 }
 function fmtWhen(iso){ if(!iso) return ""; var d = new Date(iso); return d.toLocaleDateString("en-ZA", { day: "numeric", month: "short" }) + " " + d.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit" }); }
@@ -2499,7 +2512,15 @@ function syncTransport(){
     try{ db = F.initializeFirestore(app, { localCache: F.persistentLocalCache({ tabManager: F.persistentSingleTabManager() }) }); }catch(e){ db = F.getFirestore(app); }
     if(cfg.emulator){ Au.connectAuthEmulator(auth, "http://" + cfg.emulator + ":9099", { disableWarnings: true }); F.connectFirestoreEmulator(db, cfg.emulator, 8085); }
     var t = {
-      signIn: function(){ return auth.currentUser ? Promise.resolve(auth.currentUser.uid) : Au.signInAnonymously(auth).then(function(c){ return c.user.uid; }); },
+      /* wait for the saved session first: a phone signed in with an RO login must never be swapped for a fresh anonymous uid */
+      signIn: function(){ return (auth.authStateReady ? auth.authStateReady() : Promise.resolve()).then(function(){ return auth.currentUser ? auth.currentUser.uid : Au.signInAnonymously(auth).then(function(c){ return c.user.uid; }); }); },
+      user: function(){ return (auth.authStateReady ? auth.authStateReady() : Promise.resolve()).then(function(){ return auth.currentUser; }); },
+      /* RO logins (s-account.js): link keeps this phone's uid; sign-in switches to the account's uid */
+      linkPw: function(email, pw){ return Au.linkWithCredential(auth.currentUser, Au.EmailAuthProvider.credential(email, pw)).then(function(c){ return c.user.getIdToken(true).then(function(){ return c.user.uid; }); }); },
+      signInPw: function(email, pw){ return Au.signInWithEmailAndPassword(auth, email, pw).then(function(c){ return c.user.uid; }); },
+      signOut: function(){ return Au.signOut(auth); },
+      getRoProf: function(uid){ return F.getDoc(F.doc(db, "ros", uid)).then(function(d){ return d.exists() ? d.data() : null; }); },
+      setRoProf: function(uid, data, merge){ return F.setDoc(F.doc(db, "ros", uid), data, merge ? { merge: true } : undefined); },
       uid: function(){ return auth.currentUser ? auth.currentUser.uid : ""; },
       getRoom: function(code){ return F.getDoc(F.doc(db, "rooms", code)).then(function(d){ return d.exists() ? d.data() : null; }); },
       setRoom: function(code, data){ return F.setDoc(F.doc(db, "rooms", code), data, { merge: true }); },
@@ -2551,7 +2572,7 @@ function syncOnScores(docs){
   if(S.role === "ro" || SYNC.view) return Promise.resolve();
   var byDev = {}, jobs = [];
   var roles = rolesMap(), noRole = 0;
-  docs.forEach(function(d){ if(!d || d.deviceId === S.device.id) return; if(!d.roId || !roles[d.roId]){ noRole++; return; } var sc; try{ sc = JSON.parse(d.score); }catch(e){ return; } if(d.by){ sc.by = d.by; sc.byRo = d.roId || ""; }
+  docs.forEach(function(d){ if(!d || d.deviceId === S.device.id) return; if(!d.roId || !roles[d.roId]){ noRole++; return; } var sc; try{ sc = JSON.parse(d.score); }catch(e){ return; } if(d.by){ sc.by = d.by; sc.byRo = d.roId || ""; } if(d.acct){ sc.acct = d.acct; sc.acctName = d.acctName || ""; } else { delete sc.acct; delete sc.acctName; }
     var seenKey = d.deviceId + "~" + sc.key; if(SYNCRT.seen[seenKey] === d.score) return; SYNCRT.seen[seenKey] = d.score;
     (byDev[d.deviceId] = byDev[d.deviceId] || { name: d.deviceName || "?", scores: [], sigKeys: [] }).scores.push(sc); if(sc.sig) byDev[d.deviceId].sigKeys.push(sc.key + "#" + sc.rev); });
   if(noRole && SYNCRT.noRoleSeen !== noRole){ SYNCRT.noRoleSeen = noRole; toast("Live sync: " + noRole + " score(s) from phones without an RO role were not merged (add the RO and give them an assignment code)."); }
@@ -2581,7 +2602,7 @@ function syncFlush(){
         if(!url) return; if(url.length > SYNC_SIG_MAX){ SYNC.sigAcked[sk] = "too-big"; return; }
         return t.putSig(SYNC.code, encodeURIComponent(sk), { url: url, deviceId: S.device.id, uid: t.uid() }).then(function(){ SYNC.sigAcked[sk] = 1; syncSave(); });
       });
-      return sigJob.then(function(){ return t.putScore(SYNC.code, syncDocId(k), { score: body, key: k, rev: rev, deviceId: S.device.id, deviceName: S.device.name || "?", uid: t.uid(), at: nowISO(), stage: sc.stage || k.split("|")[0], by: (S.role === "ro" && S.device.roId ? officerName() : sc.by || officerName()) || "?", roId: S.role === "ro" ? (S.device.roId || "") : "" }); })
+      return sigJob.then(function(){ return t.putScore(SYNC.code, syncDocId(k), Object.assign({ score: body, key: k, rev: rev, deviceId: S.device.id, deviceName: S.device.name || "?", uid: t.uid(), at: nowISO(), stage: sc.stage || k.split("|")[0], by: (S.role === "ro" && S.device.roId ? officerName() : sc.by || officerName()) || "?", roId: S.role === "ro" ? (S.device.roId || "") : "" }, acctStamp(sc))); })
         .then(function(){ if(S.scores[k] && (SYNC.acked[k] || 0) < rev){ SYNC.acked[k] = rev; syncSave(); } syncPaint(); });
     }));
   }).catch(function(e){ syncPaint(); });
@@ -2724,11 +2745,103 @@ function syncJoinDialog(pre, preRo){ if(preRo) pre = pre + "-" + preRo;
   })();
 }
 function syncBoot(){
-  syncLoad();
+  syncLoad(); acctLoad();
+  /* RO login: re-check the profile (active flag) on start and when back online – only on phones that have a login */
+  if(ACCT.uid && syncConfigured()){ acctRefresh().then(function(){ if(U.tab === "match") render(); }); window.addEventListener("online", function(){ acctRefresh(); }); }
   window.addEventListener("online", function(){ if(SYNC.on){ if(!SYNCRT.unsub.length) syncStart(); else { syncSetStatus("connected"); syncFlush(); } } });
   window.addEventListener("offline", function(){ if(SYNC.on) syncSetStatus("offline"); });
   syncPaint();
   if(SYNC.on && syncConfigured()) syncStart();
+}
+/* ===================== RO logins (username + password) =====================
+   Optional. The main scoring phone keeps working anonymously, exactly as before.
+   A range officer's phone can get a persistent login: username + password (Firebase Email/Password with a synthetic
+   address "<username>@ro.spectre.local" – no real e-mail, ID or cell number is ever asked for or stored).
+   - "Create RO login on this phone" LINKS the credential to the phone's existing anonymous uid (linkWithCredential), so the
+     uid – and with it publisher approval, cloud backups and room claims – stays the same. The profile ros/{uid} starts
+     inactive until an admin activates it (archive → RO logins).
+   - "Sign in" on another phone (or in the Android app) switches that phone to the account's uid.
+   - Every score saved while signed in to an ACTIVE login is stamped acct (uid) + acctName; firestore.rules check the stamp
+     against the active profile. Offline-entered scores keep the stamp and sync later.
+   - Deactivate = admin sets active:false (enforced by firestore.rules at once) and disables the user in the Firebase console. */
+var ACCT_KEY = "spectreScoring.acct", RO_DOMAIN = "ro.spectre.local";
+var ACCT = { uid: "", user: "", name: "", active: false, state: "" };   /* state: "", "waiting", "active", "off" */
+var ACCTRT = { busy: false, msg: "", view: "" };
+function acctLoad(){ try{ Object.assign(ACCT, JSON.parse(localStorage.getItem(ACCT_KEY) || "{}")); }catch(e){} }
+function acctSave(){ try{ localStorage.setItem(ACCT_KEY, JSON.stringify(ACCT)); }catch(e){} }
+function acctOn(){ return !!(ACCT.uid && ACCT.active && ACCT.name); }
+function acctUserOk(u){ return /^[a-z0-9][a-z0-9._-]{2,29}$/.test(u); }
+function acctEmail(u){ return String(u || "").trim().toLowerCase() + "@" + RO_DOMAIN; }
+function acctUserOf(email){ var m = /^([^@]+)@ro\.spectre\.local$/.exec(String(email || "")); return m ? m[1] : ""; }
+/* cloud stamp for one score: only when it was scored under the login this phone is signed in with now */
+function acctStamp(sc){ return sc && sc.acct && sc.acct === ACCT.uid && acctOn() && SYNCRT.t && SYNCRT.t.uid() === sc.acct ? { acct: sc.acct, acctName: String(sc.acctName || "").slice(0, 60) } : {}; }
+function acctErr(er){ var c = String(er && er.code || ""); return /invalid-credential|wrong-password|user-not-found|invalid-email/.test(c) ? "That username and password do not match an RO login." : /email-already-in-use|credential-already-in-use|provider-already-linked/.test(c) ? "That username is taken (or this phone already has a login)." : /weak-password/.test(c) ? "Use a password of at least 8 characters." : /too-many-requests/.test(c) ? "Too many tries – wait a few minutes." : /user-disabled/.test(c) ? "This RO login has been deactivated." : /network|unavailable|offline/.test(c) ? "No internet connection – try again when online." : /operation-not-allowed/.test(c) ? "Username sign-in is not switched on (Firebase console)." : (er && er.message || String(er)); }
+/* re-read the profile (active flag / name) – called on start and from "Check status" */
+function acctRefresh(){
+  if(!syncConfigured()) return Promise.resolve();
+  return syncTransport().then(function(t){ return t.user ? t.user() : null; }).then(function(u){
+    var user = u && !u.isAnonymous ? acctUserOf(u.email) : "";
+    if(!user){ if(ACCT.uid){ ACCT = { uid: "", user: "", name: "", active: false, state: "" }; acctSave(); } return; }
+    ACCT.uid = u.uid; ACCT.user = user;
+    return SYNCRT.t.getRoProf(u.uid).then(function(p){
+      ACCT.name = p ? String(p.name || "") : ACCT.name; ACCT.active = !!(p && p.active === true); ACCT.state = !p ? "waiting" : p.active === true ? "active" : p.activatedAt ? "off" : "waiting"; acctSave();
+      if(ACCT.active && p.deviceId !== S.device.id) SYNCRT.t.setRoProf(u.uid, { deviceId: S.device.id, deviceName: String(S.device.name || "").slice(0, 60), seenAt: nowISO() }, true).catch(function(){});
+    });
+  }).catch(function(){ /* offline: keep the last known state, scoring carries on */ });
+}
+function acctStatusText(){ return ACCT.state === "active" ? "Active" : ACCT.state === "off" ? "Deactivated" : "Waiting for the admin to activate it"; }
+function acctCard(){
+  var h = '<div class="card" id="acctCard"><h3>RO login</h3>', m = ACCTRT.msg ? '<div class="small" id="acctMsg" style="margin:6px 0"><b>' + esc(ACCTRT.msg) + '</b></div>' : "";
+  if(!syncConfigured()) return h + '<p class="small muted">Not available in this build.</p></div>';
+  if(ACCT.uid){
+    h += '<div>Signed in as <b id="acctName">' + esc(ACCT.name || ACCT.user) + '</b> <span class="small muted">(' + esc(ACCT.user) + ')</span></div><div class="small">Status: <b id="acctState" data-st="' + esc(ACCT.state) + '">' + esc(acctStatusText()) + '</b></div>' + m +
+      '<p class="small muted">' + (acctOn() ? "Scores saved on this phone are stamped with this login." : "Scores are not stamped with this login until it is active.") + ' You stay signed in, also offline.</p>' +
+      '<div class="grid2"><button type="button" id="acctCheck">Check status</button><button type="button" class="danger" id="acctOut">Sign out…</button></div>';
+    return h + '</div>';
+  }
+  var v = ACCTRT.view;
+  h += '<p class="small muted">For range officers. A login keeps your scores tied to you on any phone or the Android app. Only a username, your name and a password – never ID or cell numbers.</p>' + m;
+  if(v === "in" || v === "new") h += (v === "new" ? '<label>Your name (as on the score sheets)</label><input id="acctNm" maxlength="60" autocomplete="name">' : "") +
+    '<label>Username</label><input id="acctUser" maxlength="30" autocapitalize="off" autocomplete="username" placeholder="e.g. robert">' +
+    '<label>Password' + (v === "new" ? " (8+ characters)" : "") + '</label><input id="acctPw" type="password" autocomplete="' + (v === "new" ? "new-password" : "current-password") + '">' +
+    (v === "new" ? '<label>Password again</label><input id="acctPw2" type="password" autocomplete="new-password">' : "") +
+    '<div class="grid2" style="margin-top:8px"><button type="button" class="primary" id="acctGo">' + (v === "new" ? "Create login" : "Sign in") + '</button><button type="button" id="acctBack">Cancel</button></div>';
+  else h += '<div class="grid2"><button type="button" class="primary" id="acctShowIn">Sign in</button><button type="button" id="acctShowNew">Create RO login on this phone</button></div>';
+  return h + '</div>';
+}
+function acctBusy(p){ ACCTRT.busy = true; var b = $("acctGo"); if(b) b.disabled = true; return p.then(function(){ ACCTRT.busy = false; render(); }, function(er){ ACCTRT.busy = false; ACCTRT.msg = acctErr(er); render(); }); }
+function acctBind(){
+  var c = $("acctCard"); if(!c) return;
+  c.onclick = function(e){ var b = e.target.closest("button"); if(!b || ACCTRT.busy) return;
+    if(b.id === "acctShowIn" || b.id === "acctShowNew"){ ACCTRT.view = b.id === "acctShowIn" ? "in" : "new"; ACCTRT.msg = ""; render(); }
+    else if(b.id === "acctBack"){ ACCTRT.view = ""; ACCTRT.msg = ""; render(); }
+    else if(b.id === "acctGo") acctGo();
+    else if(b.id === "acctCheck"){ ACCTRT.msg = ""; acctBusy(acctRefresh().then(function(){ ACCTRT.msg = "Status: " + acctStatusText(); })); }
+    else if(b.id === "acctOut") ask("Sign out of " + (ACCT.name || ACCT.user) + "? Scores already on this phone stay. Scores you enter after signing out are not stamped with your login.", { ok: "Sign out", okClass: "danger" }).then(function(ok){
+      if(!ok) return; acctBusy(syncTransport().then(function(t){ syncStop(true); return t.signOut(); }).then(function(){ ACCT = { uid: "", user: "", name: "", active: false, state: "" }; acctSave(); ACCTRT.view = ""; ACCTRT.msg = "Signed out."; if(SYNC.on) syncStart(); })); });
+  };
+}
+function acctGo(){
+  var v = ACCTRT.view, user = ($("acctUser").value || "").trim().toLowerCase(), pw = $("acctPw").value || "", nm = v === "new" ? ($("acctNm").value || "").replace(/\s+/g, " ").trim().slice(0, 60) : "";
+  ACCTRT.msg = "";
+  if(!acctUserOk(user)){ ACCTRT.msg = "Username: 3–30 lower-case letters, digits, dot, dash or underscore."; return render(); }
+  if(v === "new"){
+    if(!nm){ ACCTRT.msg = "Type your name."; return render(); }
+    if(/\d{6,}|@/.test(nm)){ ACCTRT.msg = "Name only, please – no numbers or e-mail."; return render(); }
+    if(pw.length < 8){ ACCTRT.msg = "Use a password of at least 8 characters."; return render(); }
+    if(pw !== $("acctPw2").value){ ACCTRT.msg = "The two passwords differ."; return render(); }
+    /* link to THIS phone's anonymous uid: same uid afterwards, so approvals and backups carry over */
+    return acctBusy(syncTransport().then(function(t){ return t.signIn().then(function(){ return t.linkPw(acctEmail(user), pw); }).then(function(uid){
+      return t.setRoProf(uid, { name: nm, user: user, active: false, deviceId: S.device.id, deviceName: String(S.device.name || "").slice(0, 60), createdAt: nowISO() }).then(function(){
+        ACCT = { uid: uid, user: user, name: nm, active: false, state: "waiting" }; acctSave(); ACCTRT.view = ""; ACCTRT.msg = "Login created. Ask the admin to activate it, then tap Check status."; }); }); }));
+  }
+  if(!pw){ ACCTRT.msg = "Type your password."; return render(); }
+  var go = function(){ return acctBusy(syncTransport().then(function(t){ syncStop(true); return t.signInPw(acctEmail(user), pw); }).then(acctRefresh).then(function(){ ACCTRT.view = ""; ACCTRT.msg = ACCT.uid ? "Signed in. Status: " + acctStatusText() : "Signed in."; if(SYNC.on) syncStart(); })); };
+  /* a phone that never had a login gets a different uid after signing in: say so before its anonymous ID is replaced */
+  return syncTransport().then(function(t){ return t.user(); }).then(function(u){
+    if(u && u.isAnonymous) return ask("Signing in switches this phone to your login's ID. This phone's own anonymous ID (and its cloud backups or archive approval, if any) is left behind. Scores on this phone stay. Carry on?", { ok: "Sign in" }).then(function(ok){ if(ok) return go(); });
+    return go();
+  }, function(er){ ACCTRT.msg = acctErr(er); render(); });
 }
 /* ===================== Shooter registration – shared by the scoring app (organiser) and register.html (shooters) =====================
    regs/{CODE}                 match registration (name, date, divisions, squads {id:{n,max}}, closesMs, closed) – no personal data
@@ -3299,7 +3412,7 @@ function archivePaint(){ var w = $("archWho"); if(w) w.outerHTML = archivePubLin
 /* confirm, then publish / update */
 function archiveConfirmPublish(){
   var live = archiveLive(), pr = archiveProgress();
-  var msg = (live ? "Update the archive entry for " : "Publish ") + (S.match.name || "this match") + (S.match.date ? " (" + S.match.date + ")" : "") + (live ? " with the current scores?" : " to the public archive?") +
+  var msg = (live ? "Update the archive entry for " : "Publish ") + (S.match.name || "this match") + (S.match.date ? " (" + S.match.date + ")" : "") + (live ? " with the current scores?" : " to the members\u2019 archive?") +
     " " + S.shooters.length + " shooters, " + liveStages().length + " stages" + (liveStages().length < S.stages.length ? " (" + (S.stages.length - liveStages().length) + " cancelled, not counted)" : "") + "." + (pr.complete ? "" : " Warning: only " + pr.done + " of " + pr.need + " scores are in – missing scores show as not ranked.");
   return ask(msg, { ok: live ? "Update archive" : "Publish" }).then(function(ok){ if(!ok) return;
     return archivePublish(false).then(function(){ toast(live ? "Archive updated" : "Published to the score sheet archive"); render(); }).catch(function(er){ alertMsg(er.message); archivePaint(); }); });
@@ -3309,7 +3422,7 @@ function archiveResultsBanner(){
   if(!syncConfigured() || S.role === "ro") return "";
   var pr = archiveProgress(); if(!pr.complete) return "";
   var live = archiveLive();
-  return '<div class="msg ' + (live ? "info" : "ok") + '" id="archBanner"><b>' + (live ? "In the archive" : "All scores are in.") + '</b> ' + (live ? "Changed a score? Update the public archive." : "Publish the results and score sheets to the public archive.") + '<button type="button" class="wide primary" style="margin-top:8px" id="archBannerGo">' + (live ? "Update archive" : "Publish to archive") + '</button></div>';
+  return '<div class="msg ' + (live ? "info" : "ok") + '" id="archBanner"><b>' + (live ? "In the archive" : "All scores are in.") + '</b> ' + (live ? "Changed a score? Update the members\u2019 archive." : "Publish the results and score sheets to the members\u2019 archive.") + '<button type="button" class="wide primary" style="margin-top:8px" id="archBannerGo">' + (live ? "Update archive" : "Publish to archive") + '</button></div>';
 }
 function archiveBind(){
   var bb = $("archBannerGo"); if(bb) bb.onclick = archiveConfirmPublish;
@@ -3318,7 +3431,7 @@ function archiveBind(){
     if(b.id === "archPub") archiveConfirmPublish();
     if(b.id === "archRecheck"){ ARCHRT.pub = null; archiveCheckPub(); }
     if(b.id === "archCopy"){ try{ navigator.clipboard.writeText(ARCHRT.uid).then(function(){ toast("Publisher ID copied"); }); }catch(er){} }
-    if(b.id === "archUnpub") ask("Remove this match from the public archive?", { ok: "Unpublish", okClass: "danger" }).then(function(ok){ if(ok) archivePublish(true).then(function(){ toast("Removed from the archive"); render(); }).catch(function(er){ alertMsg(er.message); }); });
+    if(b.id === "archUnpub") ask("Remove this match from the members\u2019 archive?", { ok: "Unpublish", okClass: "danger" }).then(function(ok){ if(ok) archivePublish(true).then(function(){ toast("Removed from the archive"); render(); }).catch(function(er){ alertMsg(er.message); }); });
   };
 }
 /* ===================== Data protection: persistent storage + backup reminders =====================
