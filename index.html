@@ -92,6 +92,11 @@ h3{font-family:var(--cond);font-size:1.15em;margin:0 0 8px;text-transform:upperc
 .ctr.auto .val{color:var(--bad)} .ctr.auto .lab small{font-weight:500;color:var(--muted)}
 .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px;margin:5px 0}
 .seg button{min-height:58px}
+.pfseg{margin:6px 0 10px}
+.pfseg label{display:flex;align-items:center;justify-content:center;gap:8px;margin:0;padding:10px 8px;min-height:50px;border:2px solid var(--border);border-radius:10px;background:var(--card);color:var(--text);font-weight:600;text-align:center;cursor:pointer}
+.pfseg input[type=radio]{width:auto;min-width:22px;min-height:22px;accent-color:var(--navy)}
+.pfseg label:has(input:checked){border-color:var(--navy);background:var(--chip)}
+.seg[hidden],.pfseg[hidden]{display:none !important}
 .fte{margin-top:6px;min-height:48px;width:100%;font-size:.9em}
 .fte.on{background:var(--bad);border-color:var(--bad);color:#fff}
 .livebar{position:sticky;bottom:calc(var(--tabh) + var(--safe-b));z-index:12;margin:12px -12px -12px;padding:8px 12px calc(8px);background:var(--navy);color:#fff;display:flex;gap:10px;align-items:center}
@@ -2260,24 +2265,89 @@ function clearAll(kind){
     return true;
   });
 }
+/* Division / category lists for the on-the-day add/edit form: use the open registration when one is loaded, otherwise the same defaults the registration portal uses. */
+function shooterReg(){ return (typeof REGRT !== "undefined" && REGRT.reg) ? REGRT.reg : null; }
+function shooterDiscOptions(k){
+  var r = shooterReg(), list = [];
+  if(r && r.disc && r.disc[k] && r.disc[k].length) list = r.disc[k];
+  else if(r && r.divisions && r.divisions.length) list = r.divisions.filter(function(d){ return discOfCls(regDivCode(d)) === k; });
+  if(list.length) return list.map(function(d){ var c = typeof d === "string" ? regDivCode(d) : d.c; var n = typeof d === "string" && d.indexOf(" – ") >= 0 ? d.split(" – ").slice(1).join(" – ") : ((CLS[c] || {}).n || ""); return { c: c, n: n }; });
+  return CLASSES.filter(function(c){ return discOfCls(c.c) === k; }).map(function(c){ return { c: c.c, n: c.n }; });
+}
+function shooterCatOptions(){ var r = shooterReg(); if(r && r.cats && r.cats.length) return r.cats.slice(); return String(typeof REG_CATS !== "undefined" ? REG_CATS : "Open, Lady, Junior, Senior, Super Senior").split(",").map(function(x){ return x.trim(); }).filter(Boolean); }
+function shooterClassOptions(){ var r = shooterReg(); return r && r.classes && r.classes.length ? r.classes.slice() : []; }
+/* current per-discipline divisions for the form; a legacy single-cls shooter is pre-filled in that class's discipline */
+function shooterDivsOf(sh){
+  var o = {};
+  if(hasDivs(sh)){ DISCS.forEach(function(k){ if(!sh.divs[k]) return; o[k] = { c: sh.divs[k].c || "", t: sh.divs[k].t || "", pf: sh.divs[k].pf || (DISC_PF[k] ? "minor" : "") }; }); return o; }
+  if(sh && (sh.cls || sh.clsText)){ var k = sh.cls ? (discOfCls(sh.cls) || "handgun") : "handgun"; o[k] = { c: sh.cls || "", t: sh.cls ? "" : (sh.clsText || ""), pf: DISC_PF[k] ? (sh.pf || "minor") : "" }; }
+  return o;
+}
+function readShooterDivs(root){
+  var divs = {}, err = "";
+  DISCS.forEach(function(k){
+    var sel = root.querySelector("#fDiv_" + k); if(!sel) return;
+    var v = sel.value;
+    if(!v) return;
+    var d = {};
+    if(v === "__other"){ var t = (root.querySelector("#fDivText_" + k) || {}).value; t = (t || "").trim(); if(!t){ err = err || "Enter the " + DISC_N[k] + " division text, or choose a listed division."; return; } d.c = ""; d.t = t; }
+    else { d.c = v; d.t = ""; }
+    if(DISC_PF[k]){ var p = root.querySelector('input[name="fPf_' + k + '"]:checked'); d.pf = p ? p.value : "minor"; }
+    divs[k] = d;
+  });
+  if(!err && !Object.keys(divs).length) err = "Choose a division in at least one discipline.";
+  return { divs: divs, err: err };
+}
+function bindShooterDiscFields(root){
+  DISCS.forEach(function(k){
+    var sel = root.querySelector("#fDiv_" + k); if(!sel) return;
+    sel.onchange = function(){
+      var other = root.querySelector("#fDivText_" + k); if(other) other.hidden = sel.value !== "__other";
+      var pf = root.querySelector("#fPfW_" + k); if(pf) pf.hidden = !sel.value;
+    };
+  });
+}
 function editShooter(id){
-  var sh = id ? shooterById(id) : { first: "", last: "", member: "", cls: "", clsText: "", squad: "", cat: "", email: "", no: null };
+  var sh = id ? shooterById(id) : { first: "", last: "", member: "", cls: "", clsText: "", squad: "", cat: "", email: "", no: null, divs: null, pf: "", grade: "", visitor: false };
   var ro = S.role === "ro", o = $("overlay");
-  var opts = '<option value="">– choose –</option>' + Object.keys(GROUPS).map(function(g){ return '<optgroup label="' + esc(GROUPS[g].n) + '">' + CLASSES.filter(function(c){ return c.g === g; }).map(function(c){ return '<option value="' + c.c + '"' + (sh.cls === c.c ? " selected" : "") + '>' + c.c + " – " + esc(c.n) + '</option>'; }).join("") + '</optgroup>'; }).join("") + '<option value="__other"' + (!sh.cls && sh.clsText ? " selected" : "") + '>Other / not listed…</option>';
+  var cur = shooterDivsOf(sh);
+  var discH = '<h3 style="margin:14px 0 4px">Disciplines</h3><p class="small muted" style="margin:0 0 6px">Choose a division for each discipline you are entering (at least one). Handgun and rifle also get a power factor (minor/major).</p>' +
+    DISCS.map(function(k){
+      var d = cur[k] || {}, entered = !!(d.c || d.t);
+      var opts = '<option value="">– not entering –</option>' + shooterDiscOptions(k).map(function(c){ return '<option value="' + esc(c.c) + '"' + (d.c === c.c ? " selected" : "") + '>' + esc(c.c) + (c.n ? " – " + esc(c.n) : "") + '</option>'; }).join("") +
+        '<option value="__other"' + (!d.c && d.t ? " selected" : "") + '>Other / not listed…</option>';
+      var pf = DISC_PF[k] ? '<div class="seg pfseg" id="fPfW_' + k + '"' + (entered ? "" : " hidden") + '><label><input type="radio" name="fPf_' + k + '" value="minor"' + (d.pf !== "major" ? " checked" : "") + '> ' + DISC_N[k] + ' minor</label><label><input type="radio" name="fPf_' + k + '" value="major"' + (d.pf === "major" ? " checked" : "") + '> ' + DISC_N[k] + ' major</label></div>' : "";
+      return '<label for="fDiv_' + k + '">' + DISC_N[k] + ' division</label><select id="fDiv_' + k + '" data-disc="' + k + '">' + opts + '</select>' +
+        '<input id="fDivText_' + k + '" placeholder="Class / division text" value="' + esc(d.t || "") + '"' + (!d.c && d.t ? "" : " hidden") + ' style="margin-top:6px">' + pf;
+    }).join("");
+  var cats = shooterCatOptions(), catIn = sh.cat && cats.indexOf(sh.cat) >= 0, catOther = !!(sh.cat && !catIn);
+  var catH = '<label for="fCat">Category</label><select id="fCat"><option value="">– choose –</option>' + cats.map(function(c){ return '<option value="' + esc(c) + '"' + (sh.cat === c ? " selected" : "") + '>' + esc(c) + '</option>'; }).join("") +
+    '<option value="__other"' + (catOther ? " selected" : "") + '>Other / not listed…</option></select>' +
+    '<input id="fCatText" placeholder="Category" value="' + esc(catOther ? sh.cat : "") + '"' + (catOther ? "" : " hidden") + ' style="margin-top:6px">';
+  var grades = shooterClassOptions(), showGrade = grades.length || !!(sh.grade);
+  if(sh.grade && grades.indexOf(sh.grade) < 0) grades = grades.concat([sh.grade]);
+  var gradeH = showGrade ? '<label for="fGrade">Class</label><select id="fGrade"><option value="">– none –</option>' + grades.map(function(c){ return '<option value="' + esc(c) + '"' + (sh.grade === c ? " selected" : "") + '>' + esc(c) + '</option>'; }).join("") + '</select>' : "";
   o.innerHTML = '<h2>' + (id ? "Edit shooter" : "Add shooter") + '</h2><div class="grid2"><div><label>First name</label><input id="fFirst" value="' + esc(sh.first) + '" autocomplete="off"></div><div><label>Last name</label><input id="fLast" value="' + esc(sh.last) + '" autocomplete="off"></div></div>' +
-    '<label>Firearm class (rulebook Table/Ch. 1)</label><select id="fCls">' + opts + '</select><input id="fClsText" placeholder="Class / division text" value="' + esc(sh.clsText || "") + '"' + (!sh.cls && sh.clsText ? "" : " hidden") + ' style="margin-top:6px">' +
+    discH +
     '<div class="grid2"><div><label>Squad</label><input id="fSquad" value="' + esc(sh.squad) + '"></div><div><label>Shooter no.</label><input id="fNo" inputmode="numeric" value="' + (sh.no || "") + '"></div></div>' +
     (id && !ro ? '<div class="small muted" style="margin-top:6px">Move to squad:</div><div id="fQuick">' + squadNames().filter(function(x){ return x !== (sh.squad || ""); }).map(function(x){ return '<button type="button" class="chip" style="font-size:1em;padding:8px 14px" data-qsq="' + esc(x) + '">' + (x ? esc(x) : "No squad") + '</button>'; }).join("") + '<button type="button" class="chip" style="font-size:1em;padding:8px 14px" data-qsq="__new">New…</button></div>' : "") +
-    '<div class="grid2"><div><label>Member no.</label><input id="fMember" value="' + esc(sh.member) + '"></div><div><label>Category / age</label><input id="fCat" value="' + esc(sh.cat) + '"></div></div>' +
+    '<div class="grid2"><div><label>Member no.</label><input id="fMember" value="' + esc(sh.member) + '"></div><div>' + catH + '</div></div>' +
+    gradeH +
     '<label>Email (optional)</label><input id="fEmail" type="email" value="' + esc(sh.email) + '">' +
     '<label class="chk" style="margin-top:8px"><input type="checkbox" id="fVisitor"' + (sh.visitor ? " checked" : "") + '> Visitor (not a club member)</label>' +
     '<div class="grid2" style="margin-top:14px"><button type="button" id="fCancel">Cancel</button><button type="button" class="primary" id="fSave"' + (ro ? " disabled" : "") + '>Save</button></div>' + (id && !ro ? '<button type="button" class="danger wide" style="margin-top:10px" id="fDel">Delete shooter</button>' : "");
   o.hidden = false; window.scrollTo(0, 0);
-  $("fCls").onchange = function(){ $("fClsText").hidden = this.value !== "__other"; };
+  bindShooterDiscFields(o);
+  $("fCat").onchange = function(){ $("fCatText").hidden = this.value !== "__other"; };
   $("fCancel").onclick = function(){ o.hidden = true; };
   $("fSave").onclick = function(){
-    var n = { first: $("fFirst").value.trim(), last: $("fLast").value.trim(), member: $("fMember").value.trim(), squad: $("fSquad").value.trim(), cat: $("fCat").value.trim(), email: $("fEmail").value.trim(), visitor: $("fVisitor").checked, no: parseInt($("fNo").value, 10) || null };
-    var c = $("fCls").value; n.cls = c && c !== "__other" ? c : ""; n.clsText = c === "__other" ? $("fClsText").value.trim() : "";
+    var n = { first: $("fFirst").value.trim(), last: $("fLast").value.trim(), member: $("fMember").value.trim(), squad: $("fSquad").value.trim(), email: $("fEmail").value.trim(), visitor: $("fVisitor").checked, no: parseInt($("fNo").value, 10) || null };
+    var catV = $("fCat").value; n.cat = catV === "__other" ? $("fCatText").value.trim() : catV;
+    var gEl = $("fGrade"); n.grade = gEl ? gEl.value : (sh.grade || "");
+    var rd = readShooterDivs(o); if(rd.err){ alertMsg(rd.err); return; }
+    n.divs = rd.divs;
+    var firstK = DISCS.filter(function(k){ return n.divs[k]; })[0], f = n.divs[firstK];
+    n.cls = f.c || ""; n.clsText = f.c ? "" : (f.t || ""); n.pf = f.pf || "";
     if(!n.first && !n.last){ alertMsg("Enter a name."); return; }
     var same = S.shooters.filter(function(s){ return s.id !== id && nameKey(s) === nameKey(n); });
     var commit = function(){
