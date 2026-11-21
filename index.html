@@ -1844,7 +1844,7 @@ function packBase(kind){ return { app: SS_APP, kind: kind, version: SS_SCHEMA, a
 function makeStagePack(stageIds, forName){
   var p = packBase("stagepack"); p.forDevice = forName || ""; p.assigned = stageIds.slice();
   p.stages = S.stages.filter(function(s){ return stageIds.indexOf(s.id) >= 0; });
-  p.shooters = S.shooters.map(function(sh){ var c = clone(sh); delete c.email; return c; }); /* privacy: RO phones / live rooms never get e-mails */ return p;
+  p.shooters = S.shooters.map(function(sh){ var c = stripIdCell(clone(sh)); delete c.email; return c; }); /* privacy: RO phones / live rooms never get e-mails, ID or cell numbers */ return p;
 }
 /* RO phone → main phone: all scores this phone holds for its stages */
 function makeScoresPack(withSigs){
@@ -1856,7 +1856,7 @@ function makeScoresPack(withSigs){
 function makeBackup(){
   var ks = []; Object.keys(S.scores).forEach(function(k){ for(var r = 1; r <= (S.scores[k].rev || 1) + 1; r++) ks.push(k + "#" + r); });
   S.conflicts.forEach(function(c){ ks.push(c.key + "#" + c.incoming.rev); });
-  return sigAll(ks).then(function(m){ var b = packBase("backup"); b.state = S; b.undo = UNDO; b.sigs = m; return b; });
+  return sigAll(ks).then(function(m){ var b = packBase("backup"); b.state = stripIdCell(clone(S)); b.undo = stripIdCell(clone(UNDO)); b.sigs = m; return b; });
 }
 function parsePackText(txt){
   var raw; try{ raw = JSON.parse(txt); }catch(e){ throw new Error("The file is not valid JSON."); }
@@ -2958,6 +2958,65 @@ function regCSV(reg, entries){
   entries.forEach(function(e){ rows.push([e.first, e.last, e.member || "", e.visitor ? "yes" : "no", e.email].concat((function(d){ return [d.handgun ? d.handgun.d : "", d.handgun ? d.handgun.pf || "" : "", d.shotgun ? d.shotgun.d : "", d.rifle ? d.rifle.d : "", d.rifle ? d.rifle.pf || "" : ""]; })(regEntryDivs(e))).concat([ e.cls, e.cat, reg.squads[e.squad] ? reg.squads[e.squad].n : e.squad, e.status, e.paid ? "yes" : "no", e.createdAt, e.updatedAt])); });
   return rows.map(function(r){ return r.map(q).join(","); }).join("\r\n") + "\r\n";
 }
+
+/* Optional SA ID + cell for the indemnity form only.
+   Stored in regs/{CODE}/private/{TOKEN} (sibling of the entry, never on the entry doc).
+   Registrants may create/update/delete their own; only club admins may list or purge.
+   These fields must never go into backups, rooms, packs, the archive or localStorage. */
+function regSaIdNorm(s){ return String(s || "").replace(/\s+/g, ""); }
+function regSaIdLooks(s){ return /^\d{13}$/.test(regSaIdNorm(s)); }
+function regSaIdLuhn(s){
+  s = regSaIdNorm(s);
+  if(!/^\d{13}$/.test(s)) return false;
+  var mm = +s.slice(2, 4), dd = +s.slice(4, 6);
+  if(mm < 1 || mm > 12 || dd < 1 || dd > 31) return false;
+  var odd = 0, even = "", i, e, es = 0;
+  for(i = 0; i < 12; i++){ if(i % 2 === 0) odd += +s[i]; else even += s[i]; }
+  e = String(Number(even) * 2);
+  for(i = 0; i < e.length; i++) es += +e[i];
+  return ((10 - (odd + es) % 10) % 10) === +s[12];
+}
+function regCellDigits(s){ return String(s || "").replace(/\D/g, ""); }
+function regPrivWarn(id, cell){
+  var w = [];
+  if(regSaIdLooks(id) && !regSaIdLuhn(id)) w.push("That ID number doesn't look like a valid South African ID.");
+  if(String(cell || "").trim() && regCellDigits(cell).length !== 10) w.push("That cell number is not 10 digits.");
+  return w;
+}
+function regPrivRef(F, db, code, tok){ return F.doc(db, "regs", code, "private", tok); }
+function regPrivBody(id, cell, uid, prev){
+  var now = regNowISO();
+  return { idNumber: String(id || "").trim().slice(0, 20), cell: String(cell || "").trim().slice(0, 20), consent: true, uid: uid, createdAt: prev && prev.createdAt ? prev.createdAt : now, updatedAt: now };
+}
+function regSavePrivate(F, db, code, tok, id, cell, uid, consent){
+  var ref = regPrivRef(F, db, code, tok);
+  id = String(id || "").trim().slice(0, 20); cell = String(cell || "").trim().slice(0, 20);
+  if(!consent || (!id && !cell)) return F.deleteDoc(ref).then(function(){ return null; }, function(){ return null; });
+  return F.getDoc(ref).then(function(d){ return d.exists() ? d.data() : null; }, function(){ return null; }).then(function(prev){
+    var body = regPrivBody(id, cell, uid, prev);
+    return F.setDoc(ref, body).then(function(){ return body; });
+  });
+}
+function regLoadPrivate(F, db, code, tok){ return F.getDoc(regPrivRef(F, db, code, tok)).then(function(d){ return d.exists() ? d.data() : null; }, function(){ return null; }); }
+function regListPrivate(F, db, code){ return F.getDocs(F.collection(db, "regs", code, "private")).then(function(q){ var m = {}; q.docs.forEach(function(d){ m[d.id] = d.data(); }); return m; }); }
+function regPurgePrivate(F, db, code){
+  return F.getDocs(F.collection(db, "regs", code, "private")).then(function(q){
+    if(!q.docs.length) return 0;
+    var n = 0, chain = Promise.resolve(), i;
+    for(i = 0; i < q.docs.length; i += 400){
+      (function(docs){ chain = chain.then(function(){ var b = F.writeBatch(db); docs.forEach(function(d){ b.delete(d.ref); }); return b.commit(); }); })(q.docs.slice(i, i + 400));
+      n += Math.min(400, q.docs.length - i);
+    }
+    return chain.then(function(){ return n; });
+  });
+}
+/* Defence: drop ID / cell keys from a pack, backup or archive payload. Never log the values. */
+var IDCELL_KEY = /^(idno|idnum|idnumber|id_?number|said|rsaid|identity|identitynumber|passport|cell|cellno|cellphone|mobile|phone|tel|telephone|contact|contactno)$/i;
+function stripIdCell(o){
+  if(Array.isArray(o)) return o.map(stripIdCell);
+  if(o && typeof o === "object"){ var r = {}, k; for(k in o){ if(Object.prototype.hasOwnProperty.call(o, k) && !IDCELL_KEY.test(k.replace(/[\s_-]/g, ""))) r[k] = stripIdCell(o[k]); } return r; }
+  return o;
+}
 /* ===================== Shooter registration – organiser side (main phone) =====================
    Create a registration (match, divisions, squads with slot limits, closing time) → public link + QR to register.html?m=CODE.
    Live entry list (paid tick, remove/restore), close/reopen, CSV export, import into this match's shooter list (like a PractiScore CSV). */
@@ -3400,7 +3459,7 @@ function archRos(){ return (S.ros || []).filter(function(r){ return String(r.nam
 function archivePayload(at){
   var sheets = squadSorted(S.shooters).map(function(sh){ var d = sheetData(sh); delete d.match; delete d.ver; delete d.method; delete d.neg; d.rows.forEach(function(r){ delete r.sigKey; }); var vt = S.archive && S.archive.tok && S.archive.tok[sh.id]; if(spTokOk(vt)) d.vt = vt; else delete d.vt; return d; });
   var rt = S.archive && S.archive.rtok;
-  return { v: 1, rt: spTokOk(rt) ? rt : undefined, publishedAt: at, match: archMatchInfo(), notes: notesPlain(), neg: matchModel() !== "positive", method: METHOD_TEXT[matchMethod()] || "", ver: SS_VER, sheets: sheets, stages: S.stages.map(function(st){ return { no: st.no, title: st.title, rounds: stageTotal(st).rounds, firearms: st.firearms || [], limited: !!st.limited, sub: st.subtitle || "", desc: archPackStage(st).desc, roundsNote: archPackStage(st).rounds, cancelled: stCancelled(st) || undefined }; }), tables: resultsSnapshot().tables, ros: archRos() };
+  return stripIdCell({ v: 1, rt: spTokOk(rt) ? rt : undefined, publishedAt: at, match: archMatchInfo(), notes: notesPlain(), neg: matchModel() !== "positive", method: METHOD_TEXT[matchMethod()] || "", ver: SS_VER, sheets: sheets, stages: S.stages.map(function(st){ return { no: st.no, title: st.title, rounds: stageTotal(st).rounds, firearms: st.firearms || [], limited: !!st.limited, sub: st.subtitle || "", desc: archPackStage(st).desc, roundsNote: archPackStage(st).rounds, cancelled: stCancelled(st) || undefined }; }), tables: resultsSnapshot().tables, ros: archRos() });
 }
 /* ---------- who may publish: allow-listed uids (Firestore publishers/{uid}, added by hand in the Firebase console) ---------- */
 /* publisher check runs only on a tap or a publish (never on render: no surprise sign-ins / network on ordinary phones); last answer remembered on this phone */

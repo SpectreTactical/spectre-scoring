@@ -23,6 +23,12 @@ button:disabled{opacity:.5}
 .sq input{width:auto}.sq .left{margin-left:auto;font-size:14px}.sq.full{opacity:.5}.sq.on{border-color:#14284b;background:#eef3ff}
 .muted{color:#5d6780}.small{font-size:14px}.msg{padding:10px 12px;border-radius:8px;margin:8px 0}.ok{background:#e3f5e6}.warn{background:#fff3d6}.err{background:#fde2e2}
 .seg{display:flex;gap:8px}.seg label{flex:1;border:1px solid #c9d1df;border-radius:8px;padding:10px;margin:0;font-weight:400;text-align:center}.seg input{width:auto}
+.agree{display:flex;align-items:flex-start;gap:10px;font-weight:400;padding:10px;border:1px solid #c9d1df;border-radius:8px;margin:10px 0;cursor:pointer;font-size:14px;line-height:1.35}
+.agree input{width:auto;margin-top:3px;flex-shrink:0}
+.agree.on{border-color:#14284b;background:#eef3ff}
+.opt{margin-top:14px;padding-top:12px;border-top:1px solid #e2e6ee}
+.warnline{color:#8a5a00;font-size:13px;margin:6px 0 0}
+
 code{word-break:break-all;background:#eef1f6;padding:2px 4px;border-radius:4px}
 </style>
 </head>
@@ -128,14 +134,73 @@ function regCSV(reg, entries){
   return rows.map(function(r){ return r.map(q).join(","); }).join("\r\n") + "\r\n";
 }
 
+/* Optional SA ID + cell for the indemnity form only.
+   Stored in regs/{CODE}/private/{TOKEN} (sibling of the entry, never on the entry doc).
+   Registrants may create/update/delete their own; only club admins may list or purge.
+   These fields must never go into backups, rooms, packs, the archive or localStorage. */
+function regSaIdNorm(s){ return String(s || "").replace(/\s+/g, ""); }
+function regSaIdLooks(s){ return /^\d{13}$/.test(regSaIdNorm(s)); }
+function regSaIdLuhn(s){
+  s = regSaIdNorm(s);
+  if(!/^\d{13}$/.test(s)) return false;
+  var mm = +s.slice(2, 4), dd = +s.slice(4, 6);
+  if(mm < 1 || mm > 12 || dd < 1 || dd > 31) return false;
+  var odd = 0, even = "", i, e, es = 0;
+  for(i = 0; i < 12; i++){ if(i % 2 === 0) odd += +s[i]; else even += s[i]; }
+  e = String(Number(even) * 2);
+  for(i = 0; i < e.length; i++) es += +e[i];
+  return ((10 - (odd + es) % 10) % 10) === +s[12];
+}
+function regCellDigits(s){ return String(s || "").replace(/\D/g, ""); }
+function regPrivWarn(id, cell){
+  var w = [];
+  if(regSaIdLooks(id) && !regSaIdLuhn(id)) w.push("That ID number doesn't look like a valid South African ID.");
+  if(String(cell || "").trim() && regCellDigits(cell).length !== 10) w.push("That cell number is not 10 digits.");
+  return w;
+}
+function regPrivRef(F, db, code, tok){ return F.doc(db, "regs", code, "private", tok); }
+function regPrivBody(id, cell, uid, prev){
+  var now = regNowISO();
+  return { idNumber: String(id || "").trim().slice(0, 20), cell: String(cell || "").trim().slice(0, 20), consent: true, uid: uid, createdAt: prev && prev.createdAt ? prev.createdAt : now, updatedAt: now };
+}
+function regSavePrivate(F, db, code, tok, id, cell, uid, consent){
+  var ref = regPrivRef(F, db, code, tok);
+  id = String(id || "").trim().slice(0, 20); cell = String(cell || "").trim().slice(0, 20);
+  if(!consent || (!id && !cell)) return F.deleteDoc(ref).then(function(){ return null; }, function(){ return null; });
+  return F.getDoc(ref).then(function(d){ return d.exists() ? d.data() : null; }, function(){ return null; }).then(function(prev){
+    var body = regPrivBody(id, cell, uid, prev);
+    return F.setDoc(ref, body).then(function(){ return body; });
+  });
+}
+function regLoadPrivate(F, db, code, tok){ return F.getDoc(regPrivRef(F, db, code, tok)).then(function(d){ return d.exists() ? d.data() : null; }, function(){ return null; }); }
+function regListPrivate(F, db, code){ return F.getDocs(F.collection(db, "regs", code, "private")).then(function(q){ var m = {}; q.docs.forEach(function(d){ m[d.id] = d.data(); }); return m; }); }
+function regPurgePrivate(F, db, code){
+  return F.getDocs(F.collection(db, "regs", code, "private")).then(function(q){
+    if(!q.docs.length) return 0;
+    var n = 0, chain = Promise.resolve(), i;
+    for(i = 0; i < q.docs.length; i += 400){
+      (function(docs){ chain = chain.then(function(){ var b = F.writeBatch(db); docs.forEach(function(d){ b.delete(d.ref); }); return b.commit(); }); })(q.docs.slice(i, i + 400));
+      n += Math.min(400, q.docs.length - i);
+    }
+    return chain.then(function(){ return n; });
+  });
+}
+/* Defence: drop ID / cell keys from a pack, backup or archive payload. Never log the values. */
+var IDCELL_KEY = /^(idno|idnum|idnumber|id_?number|said|rsaid|identity|identitynumber|passport|cell|cellno|cellphone|mobile|phone|tel|telephone|contact|contactno)$/i;
+function stripIdCell(o){
+  if(Array.isArray(o)) return o.map(stripIdCell);
+  if(o && typeof o === "object"){ var r = {}, k; for(k in o){ if(Object.prototype.hasOwnProperty.call(o, k) && !IDCELL_KEY.test(k.replace(/[\s_-]/g, ""))) r[k] = stripIdCell(o[k]); } return r; }
+  return o;
+}
+
 /* s-indemnity.js – SWPC Range Booking Register & Indemnity Form, pre-filled from the registration.
    Overlays text onto the club's original PDF (legal text untouched) with pdf-lib, entirely on this phone.
-   Fills: date, match/squad remark, SWPC member no, name. ID number, contact number and signature are
-   ALWAYS left blank – handwritten on paper on the day; the app never collects or stores them. */
+   Fills: date, match/squad remark, SWPC member no, name. ID number and contact number are filled only
+   when an admin supplies values the shooter opted in to store (regs/.../private). Signature stays blank. */
 var INDEM = { rows: 10, lib: null,
   /* PDF user-space (page is rotated 90°; text drawn rotated so it reads across the landscape page) */
   rowX: function(i){ return 350 + i * 20.05 + 14; },
-  colY: { member: 33, name: 142 },
+  colY: { member: 33, name: 142, id: 362, cell: 516 },
   /* checkbox centres (glyph squares measured with PyMuPDF): arrival 6, departure 4 – the club does all of these, so all pre-ticked */
   boxX: [142.62, 156.17, 169.72, 183.27, 196.82, 210.37], arrY: 164.6, depY: 532.0, depN: 4,
   timeIn: "09:00", timeOut: "16:30" };
@@ -152,7 +217,7 @@ function indemPages(reg, entries, perSquad){
   act.forEach(function(e){
     var sq = reg.squads && reg.squads[e.squad] ? reg.squads[e.squad].n : (e.squad || "");
     if(!cur || cur.rows.length >= INDEM.rows || (perSquad && cur.squad !== sq)){ cur = { squad: perSquad ? sq : "", rows: [] }; pages.push(cur); }
-    cur.rows.push({ member: e.visitor ? "" : String(e.member || ""), name: (String(e.first || "") + " " + String(e.last || "")).trim() });
+    cur.rows.push({ member: e.visitor ? "" : String(e.member || ""), name: (String(e.first || "") + " " + String(e.last || "")).trim(), idNumber: String(e.idNumber || ""), cell: String(e.cell || "") });
   });
   pages.push({ squad: perSquad ? "Walk-ins" : "", rows: [], blank: true }); /* spare blank sheet for walk-ins */
   return pages;
@@ -178,7 +243,7 @@ function indemBuild(reg, entries, perSquad, formBytes){
             INDEM.boxX.forEach(function(x, k){ tick(x, INDEM.arrY); if(k < INDEM.depN) tick(x, INDEM.depY); });
             var rem = [reg.name, reg.venue, p.squad, "Sheet " + (i + 1) + " of " + pages.length].filter(Boolean).join("  ·  ");
             t(pg, rem, 233, 158, 9, 600);
-            p.rows.forEach(function(r, k){ var x = INDEM.rowX(k); t(pg, r.member, x, INDEM.colY.member, 9, 48); t(pg, r.name, x, INDEM.colY.name, 10, 212); });
+            p.rows.forEach(function(r, k){ var x = INDEM.rowX(k); t(pg, r.member, x, INDEM.colY.member, 9, 48); t(pg, r.name, x, INDEM.colY.name, 10, 212); if(r.idNumber) t(pg, r.idNumber, x, INDEM.colY.id, 9, 145); if(r.cell) t(pg, r.cell, x, INDEM.colY.cell, 9, 116); });
           });
           return out.save();
         });
@@ -189,10 +254,14 @@ function indemBuild(reg, entries, perSquad, formBytes){
 /* runs on register.html (organiser view, ?m=CODE&org=1) – the scoring app no longer carries the filler */
 function indemSlug(s){ return String(s || "registration").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "registration"; }
 function indemSave(name, bytes){ var blob = new Blob([bytes], { type: "application/pdf" }), a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000); window.__lastIndem = { name: name, size: bytes.length }; }
-function indemPrint(reg, entries, perSquad){
+function indemWithPriv(entries, priv){
+  priv = priv || {};
+  return (entries || []).map(function(e){ var p = (e.tok && priv[e.tok]) || {}; return Object.assign({}, e, { idNumber: p.idNumber || e.idNumber || "", cell: p.cell || e.cell || "" }); });
+}
+function indemPrint(reg, entries, perSquad, priv){
   if(!reg) return Promise.resolve();
   return fetch("indemnity-form.pdf").then(function(r){ if(!r.ok) throw new Error("Could not load the indemnity form."); return r.arrayBuffer(); })
-    .then(function(b){ return indemBuild(reg, entries, perSquad, b); })
+    .then(function(b){ return indemBuild(reg, indemWithPriv(entries, priv), perSquad, b); })
     .then(function(bytes){ indemSave(indemSlug(reg.name) + "-indemnity-forms.pdf", bytes); });
 }
 
@@ -200,6 +269,7 @@ function indemPrint(reg, entries, perSquad){
   var P = new URLSearchParams(location.search), code = (P.get("m") || "").toUpperCase().replace(/[^A-Z0-9]/g, ""), tok = regCleanTok(P.get("t"));
   var ORG = P.get("org") === "1", orgEntries = null, orgErr = "";
   var KEY = "spectreReg." + code, app = document.getElementById("app"), F, db, auth, uid = "", reg = null, counts = {}, mine = null, msg = "", busy = false;
+  var FB = { app: null, auth: null, cfg: null }, privMine = null, privTried = "", privLoaded = false, pendingPriv = null, draft = null, admin = { uid: "", F: null, db: null, err: "", map: null, busy: false };
   var esc = function(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
   var fmt = function(ms){ var d = new Date(ms); return d.toLocaleDateString("en-ZA", { weekday: "short", day: "numeric", month: "short", year: "numeric" }) + " " + d.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit" }); };
   if(!tok){ try{ tok = regCleanTok(localStorage.getItem(KEY)); }catch(e){} }
@@ -208,32 +278,90 @@ function indemPrint(reg, entries, perSquad){
   if(!/^[A-Z0-9]{6,8}$/.test(code)) return fail("This registration link is incomplete. Ask the match organiser for the link.");
   var cfg = window.SS_FIREBASE_TEST || window.SS_FIREBASE_CONFIG, base = window.SS_FIREBASE_SDK;
   Promise.all([import(base + "firebase-app.js"), import(base + "firebase-auth.js"), import(base + "firebase-firestore.js")]).then(function(m){
-    var app0 = m[0].initializeApp(cfg); auth = m[1].getAuth(app0); F = m[2]; db = F.getFirestore(app0);
+    FB.app = m[0]; FB.auth = m[1]; FB.cfg = cfg; var app0 = m[0].initializeApp(cfg); auth = m[1].getAuth(app0); F = m[2]; db = F.getFirestore(app0);
     if(cfg.emulator){ m[1].connectAuthEmulator(auth, "http://" + cfg.emulator + ":9099", { disableWarnings: true }); F.connectFirestoreEmulator(db, cfg.emulator, 8085); }
     return (auth.currentUser ? Promise.resolve(auth.currentUser) : m[1].signInAnonymously(auth).then(function(c){ return c.user; }));
   }).then(function(u){ uid = u.uid;
     F.onSnapshot(F.doc(db, "regs", code), function(d){ reg = d.exists() ? d.data() : null; if(!reg) return fail("No registration " + code + ". Check the link with the match organiser."); paint(); }, function(e){ fail("Could not load the registration: " + e.message); });
     F.onSnapshot(F.collection(db, "regs", code, "counts"), function(q){ counts = {}; q.docs.forEach(function(d){ counts[d.id] = d.data().n; }); paint(); }, function(){});
-    if(ORG) F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ orgEntries = q.docs.map(function(d){ return d.data(); }); orgErr = ""; paint(); }, function(){ orgEntries = null; orgErr = "This page can only list the entries on the phone (and browser) that created the registration in Spectre Scoring."; paint(); });
-    if(tok) return F.getDoc(F.doc(db, "regs", code, "entries", tok)).then(function(d){ mine = d.exists() ? d.data() : null; if(!mine) tok = ""; paint(); });
+    if(ORG) F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ orgEntries = q.docs.map(function(d){ var e = d.data(); e.tok = d.id; return e; }); orgErr = ""; paint(); }, function(){ orgEntries = null; orgErr = "This page can only list the entries on the phone (and browser) that created the registration in Spectre Scoring."; paint(); });
+    if(ORG) checkIfAdmin(uid).then(function(){ paint(); });
+    if(tok) return F.getDoc(F.doc(db, "regs", code, "entries", tok)).then(function(d){ mine = d.exists() ? d.data() : null; if(!mine) tok = ""; return (!mine ? Promise.resolve(null) : regLoadPrivate(F, db, code, tok).then(function(pv){ privMine = pv; privTried = tok; privLoaded = true; }, function(){ privTried = tok; privLoaded = false; })); }).then(function(){ paint(); });
   }).catch(function(e){ fail("Could not connect (" + (e && e.message || e) + "). Check your signal and reload."); });
-  window.SSREG = { get state(){ return { reg: reg, counts: counts, mine: mine, tok: tok, msg: msg, uid: uid, org: ORG, orgEntries: orgEntries }; } };
-  /* organiser view (?org=1, opened from Spectre Scoring on the organiser's phone): the club's indemnity form, pre-filled.
-     Fills date, match/squad, member no and name only – ID number, contact number and signature stay blank for pen on the day. */
+  window.SSREG = { get state(){ return { reg: reg, counts: counts, mine: mine, tok: tok, msg: msg, uid: uid, org: ORG, orgEntries: orgEntries, hasPrivate: !!(privMine && (privMine.idNumber || privMine.cell)), isAdmin: !!admin.uid, privCount: admin.map ? Object.keys(admin.map).length : 0 }; } };
+  /* organiser view (?org=1): indemnity form. ID/cell pre-fill and purge need a club admin sign-in. */
+  function checkIfAdmin(id){
+    if(!id || !F) return Promise.resolve(false);
+    return F.getDoc(F.doc(db, "admins", id)).then(function(d){
+      if(!d.exists()) return false;
+      admin.uid = id; admin.F = F; admin.db = db; admin.err = "";
+      return loadAdminPriv();
+    }, function(){ return false; });
+  }
+  function loadAdminPriv(){
+    if(!admin.uid || !admin.F) return Promise.resolve();
+    return regListPrivate(admin.F, admin.db, code).then(function(m){ admin.map = m; admin.err = ""; }, function(){ admin.map = null; admin.err = "Could not load stored ID and cell numbers."; });
+  }
+  function adminSignIn(email, pw){
+    var cfg = FB.cfg, app, a, adb;
+    try{ app = FB.app.getApp("ssAdmin"); }catch(e){ app = FB.app.initializeApp(cfg, "ssAdmin"); }
+    a = FB.auth.getAuth(app);
+    if(cfg.emulator) try{ FB.auth.connectAuthEmulator(a, "http://" + cfg.emulator + ":9099", { disableWarnings: true }); }catch(e){}
+    adb = F.getFirestore(app);
+    if(cfg.emulator) try{ F.connectFirestoreEmulator(adb, cfg.emulator, 8085); }catch(e){}
+    return FB.auth.signInWithEmailAndPassword(a, email, pw).then(function(c){
+      return F.getDoc(F.doc(adb, "admins", c.user.uid)).then(function(d){
+        if(!d.exists()) return FB.auth.signOut(a).then(function(){ throw new Error("That account is not a club admin."); });
+        admin.uid = c.user.uid; admin.F = F; admin.db = adb; admin.err = "";
+        return loadAdminPriv();
+      });
+    });
+  }
   function orgCard(){
     if(!ORG) return "";
     if(reg.createdBy !== uid || orgErr) return '<div class="card msg warn"><b>Organiser: indemnity forms</b><br>' + esc(orgErr || "Open this from the phone that created the registration in Spectre Scoring (Match → Shooter registration).") + '</div>';
     var act = (orgEntries || []).filter(function(x){ return x.status === "active"; }).length;
-    return '<div class="card"><h2>Organiser: indemnity forms</h2><p class="small muted">The club\'s Range Booking Register &amp; Indemnity Form with the date, match, squad, member numbers and names filled in (' + act + ' active entr' + (act === 1 ? "y" : "ies") + ', plus a blank sheet for walk-ins). ID numbers, contact numbers and signatures are left blank – they are written by hand on the day and never stored.</p>' +
-      '<div class="grid2"><button type="button" class="primary" id="indAll"' + (orgEntries ? "" : " disabled") + '>Indemnity forms (PDF)</button><button type="button" id="indSq"' + (orgEntries ? "" : " disabled") + '>Per squad (PDF)</button></div></div>';
+    var nPriv = admin.map ? Object.keys(admin.map).length : 0;
+    var h = '<div class="card"><h2>Organiser: indemnity forms</h2><p class="small muted">The club\'s Range Booking Register &amp; Indemnity Form with the date, match, squad, member numbers and names filled in (' + act + ' active entr' + (act === 1 ? "y" : "ies") + ', plus a blank sheet for walk-ins). Signatures are left blank.';
+    if(admin.uid) h += ' ID and cell numbers are filled in for the ' + nPriv + ' shooter' + (nPriv === 1 ? "" : "s") + ' who opted in.</p>';
+    else h += ' ID and contact numbers stay blank unless you sign in as a club admin (they are stored only when a shooter opts in).</p>';
+    h += '<div class="grid2"><button type="button" class="primary" id="indAll"' + (orgEntries ? "" : " disabled") + '>Indemnity forms (PDF)</button><button type="button" id="indSq"' + (orgEntries ? "" : " disabled") + '>Per squad (PDF)</button></div>';
+    if(admin.uid){
+      h += '<p class="small" style="margin-top:12px">Signed in as admin.' + (admin.err ? ' <span class="msg err">' + esc(admin.err) + '</span>' : "") + '</p>';
+      h += '<button type="button" class="danger" id="purgePrivB" style="margin-top:8px">Purge ID and phone numbers…</button>';
+    }else{
+      h += '<div class="opt"><h2>Admin</h2><p class="small muted">Sign in with a club admin account to pre-fill opted-in ID and cell numbers on the form, and to purge them after the match.</p>';
+      if(admin.err) h += '<div class="msg err">' + esc(admin.err) + '</div>';
+      h += '<label for="admEmail">Admin email</label><input id="admEmail" type="email" autocomplete="username">';
+      h += '<label for="admPw">Password</label><input id="admPw" type="password" autocomplete="current-password">';
+      h += '<button type="button" id="admInB" style="margin-top:8px">Sign in as admin</button></div>';
+    }
+    return h + '</div>';
   }
-  function orgBind(){ ["indAll", "indSq"].forEach(function(id){ var b = document.getElementById(id); if(b) b.onclick = function(){ var t = b.textContent; b.disabled = true; b.textContent = "Making PDF…";
-    indemPrint(reg, orgEntries || [], id === "indSq").catch(function(er){ uiAlert(er && er.message || String(er)); }).then(function(){ b.disabled = false; b.textContent = t; }); }; }); }
+  function orgBind(){
+    ["indAll", "indSq"].forEach(function(id){ var b = document.getElementById(id); if(b) b.onclick = function(){ var t = b.textContent; b.disabled = true; b.textContent = "Making PDF…";
+      var go = admin.uid && !admin.map ? loadAdminPriv() : Promise.resolve();
+      go.then(function(){ return indemPrint(reg, orgEntries || [], id === "indSq", admin.uid ? (admin.map || {}) : {}); })
+        .catch(function(er){ uiAlert(er && er.message || String(er)); }).then(function(){ b.disabled = false; b.textContent = t; }); }; });
+    var ib = document.getElementById("admInB");
+    if(ib) ib.onclick = function(){ if(admin.busy) return; var email = val("admEmail"), pw = (document.getElementById("admPw") || {}).value || "";
+      if(!email || !pw){ admin.err = "Enter the admin email and password."; paint(); return; }
+      admin.busy = true; ib.disabled = true; ib.textContent = "Signing in…";
+      adminSignIn(email, pw).then(function(){ admin.busy = false; paint(); }, function(e){ admin.busy = false; admin.err = /user-not-found|wrong-password|invalid-credential|invalid-email/i.test(String(e && e.code || e && e.message || e)) ? "That email and password do not match an admin account." : (e && e.message || String(e)); paint(); }); };
+    var pb = document.getElementById("purgePrivB");
+    if(pb) pb.onclick = async function(){
+      if(!admin.uid) return;
+      var n = admin.map ? Object.keys(admin.map).length : 0;
+      if(!(await uiConfirm("Delete all stored ID and cell numbers for this registration (" + n + " record" + (n === 1 ? "" : "s") + ")? This cannot be undone. The indemnity form will go back to blank ID and contact fields.", { ok: "Purge", danger: true }))) return;
+      pb.disabled = true; pb.textContent = "Purging…";
+      regPurgePrivate(admin.F, admin.db, code).then(function(k){ admin.map = {}; return uiAlert(k ? ("Purged " + k + " stored ID/phone record" + (k === 1 ? "" : "s") + ".") : "There were no stored ID or phone numbers to purge."); }).then(function(){ paint(); }).catch(function(er){ uiAlert(er && er.message || String(er)); pb.disabled = false; pb.textContent = "Purge ID and phone numbers…"; });
+    };
+  }
 
   function val(id){ var e = document.getElementById(id); return e ? e.value.trim() : ""; }
   function paint(){
     if(!reg || busy) return;
-    var open = regIsOpen(reg), ids = regSquadIds(reg), act = mine && mine.status === "active", f = mine || {};
+    var open = regIsOpen(reg), ids = regSquadIds(reg), act = mine && mine.status === "active", f = Object.assign({}, mine || {}, draft || {});
     var h = '<div class="card"><h1>' + esc(reg.name) + '</h1><div class="muted">' + esc([reg.date, reg.venue].filter(Boolean).join(" · ")) + '</div>' +
       '<div class="small" style="margin-top:6px">' + (open ? 'Registration closes <b>' + esc(fmt(reg.closesMs)) + '</b>' : '<b>Registration is closed.</b>') + '</div>' + (reg.note ? '<div class="small" style="margin-top:8px;white-space:pre-wrap">' + esc(reg.note) + '</div>' : "") + '</div>';
     if(msg) h += '<div class="card msg ' + (msg.k || "ok") + '">' + msg.h + '</div>';
@@ -253,6 +381,13 @@ function indemPrint(reg, entries, perSquad){
         '<label class="agree' + (f.visitor ? " on" : "") + '" style="margin-top:10px"><input type="checkbox" id="rVisitor"' + (f.visitor ? " checked" : "") + '> Visitor (not a club member)</label>' +
         '<div id="rMemberW"' + (f.visitor ? " hidden" : "") + '><label for="rMember">SWPC member number</label><input id="rMember" maxlength="40" value="' + esc(f.member) + '"></div>' +
         '<label for="rEmail">Email (optional – only the organiser sees it)</label><input id="rEmail" type="email" maxlength="120" autocomplete="email" value="' + esc(f.email) + '">' +
+        (function(){ var pv = privMine || {}, idv = (draft && draft.idNo != null) ? draft.idNo : (pv.idNumber || ""), cv = (draft && draft.cell != null) ? draft.cell : (pv.cell || ""), cons = draft ? !!draft.consent : !!(idv || cv);
+          return '<div class="opt"><h3 style="margin:0 0 4px">ID and cell number (optional)</h3><p class="small muted" style="margin:0 0 8px">Used only to pre-fill the club indemnity form. Leave blank if you prefer not to. Stored securely; only club admins can read them.</p>' +
+            '<label for="rId">SA ID number (or passport and country)</label><input id="rId" maxlength="20" inputmode="numeric" autocomplete="off" value="' + esc(idv) + '">' +
+            '<label for="rCell">Cell number</label><input id="rCell" maxlength="20" type="tel" inputmode="numeric" autocomplete="tel" value="' + esc(cv) + '">' +
+            '<div class="warnline" id="rPrivWarn" hidden></div>' +
+            '<label class="agree' + (cons ? " on" : "") + '" id="rConsentL"><input type="checkbox" id="rConsent"' + (cons ? " checked" : "") + '> I agree that my ID and cell number may be stored securely for the indemnity form only, with access limited to club admins. I can leave these blank, or clear them later.</label></div>';
+        })() +
         '<h3 style="margin:14px 0 4px">Disciplines</h3><p class="small muted" style="margin:0">Choose a division for each discipline you are entering (at least one).</p>' +
         REG_DISCS.filter(function(k){ return byDisc[k].length; }).map(function(k){ var cur = fd[k] || {};
           return '<label for="rDiv_' + k + '">' + REG_DISC_N[k] + ' division</label><select id="rDiv_' + k + '" data-disc="' + k + '"><option value="">– not entering –</option>' + byDisc[k].map(function(d){ var c = regDivCode(d); return '<option value="' + esc(c) + '"' + (cur.d === c ? " selected" : "") + '>' + esc(d) + '</option>'; }).join("") + '</select>' +
@@ -269,7 +404,10 @@ function indemPrint(reg, entries, perSquad){
     var s = document.getElementById("saveB"); if(s) s.onclick = save;
     Array.prototype.forEach.call(document.querySelectorAll("select[data-disc]"), function(sl){ sl.onchange = function(){ var w = document.getElementById("rPfW_" + sl.dataset.disc); if(w) w.hidden = !sl.value; }; });
     var vz = document.getElementById("rVisitor"); if(vz) vz.onchange = function(){ document.getElementById("rMemberW").hidden = vz.checked; vz.parentNode.classList.toggle("on", vz.checked); };
-    var x = document.getElementById("cancelB"); if(x) x.onclick = async function(){ if(await uiConfirm("Cancel your entry? Your squad slot is released.")) commit({ status: "cancelled" }, "Your entry is cancelled. You can enter again with your edit link until registration closes."); };
+    function paintPrivWarn(){ var w = document.getElementById("rPrivWarn"); if(!w) return; var msgs = regPrivWarn(val("rId"), val("rCell")); w.hidden = !msgs.length; w.textContent = msgs.join(" "); }
+    ["rId", "rCell"].forEach(function(id){ var el = document.getElementById(id); if(el) el.oninput = paintPrivWarn; }); paintPrivWarn();
+    var cl = document.getElementById("rConsent"); if(cl) cl.onchange = function(){ document.getElementById("rConsentL").classList.toggle("on", cl.checked); };
+    var x = document.getElementById("cancelB"); if(x) x.onclick = async function(){ if(await uiConfirm("Cancel your entry? Your squad slot is released. Any stored ID or cell number for this entry is also removed.")) { pendingPriv = { idNo: "", cell: "", consent: false }; commit({ status: "cancelled" }, "Your entry is cancelled. You can enter again with your edit link until registration closes."); } };
     Array.prototype.forEach.call(document.querySelectorAll(".sq input"), function(r){ r.onchange = function(){ Array.prototype.forEach.call(document.querySelectorAll(".sq"), function(l){ l.classList.toggle("on", l.querySelector("input").checked); }); }; });
   }
   function save(){
@@ -278,13 +416,23 @@ function indemPrint(reg, entries, perSquad){
     if(!d.visitor) d.member = val("rMember");
     REG_DISCS.forEach(function(k){ var v = val("rDiv_" + k); if(!v) return; d.divs[k] = { d: v }; if(k !== "shotgun"){ var p = document.querySelector('input[name="rPf_' + k + '"]:checked'); d.divs[k].pf = p ? p.value : "minor"; } });
     var firstK = REG_DISCS.filter(function(k){ return d.divs[k]; })[0]; if(firstK){ d.division = d.divs[firstK].d; d.pf = d.divs[firstK].pf || "minor"; }
-    var err = !d.first || !d.last ? "Enter your name and surname." : !d.visitor && !d.member ? "Enter your SWPC member number, or tick Visitor." : !d.division ? "Choose a division in at least one discipline." : reg.classes.length && !d.cls ? "Choose a class." : reg.cats.length && !d.cat ? "Choose a category." : !d.squad ? "Choose a squad." : d.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email) ? "Check the email address." : "";
+    var idNo = val("rId"), cell = val("rCell"), consent = !!(document.getElementById("rConsent") || {}).checked;
+    var err = !d.first || !d.last ? "Enter your name and surname." : !d.visitor && !d.member ? "Enter your SWPC member number, or tick Visitor." : !d.division ? "Choose a division in at least one discipline." : reg.classes.length && !d.cls ? "Choose a class." : reg.cats.length && !d.cat ? "Choose a category." : !d.squad ? "Choose a squad." : d.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email) ? "Check the email address." : (idNo || cell) && !consent ? "Tick the box to store your ID or cell number for the indemnity form, or leave those fields blank." : "";
+    draft = { first: d.first, last: d.last, member: d.member, visitor: d.visitor, email: d.email, division: d.division, pf: d.pf, divs: d.divs, cls: d.cls, cat: d.cat, squad: d.squad, idNo: idNo, cell: cell, consent: consent };
     if(err){ msg = { k: "err", h: esc(err) }; paint(); window.scrollTo(0, 0); return; }
-    var isNew = !mine; commit(d, isNew ? "You are registered! Save your private edit link below." : "Your entry is saved.");
+    var warns = regPrivWarn(idNo, cell), isNew = !mine;
+    var go = function(){ pendingPriv = { idNo: idNo, cell: cell, consent: consent, loaded: privLoaded }; commit(d, isNew ? "You are registered! Save your private edit link below." : "Your entry is saved."); };
+    if(warns.length) uiConfirm(warns.join(" ") + " Save anyway?").then(function(ok){ if(ok) go(); }); else go();
   }
   function commit(patch, okText){
     if(!tok) tok = regToken(); busy = true; var b = document.getElementById("saveB"); if(b){ b.disabled = true; b.textContent = "Saving…"; }
-    regSaveEntry(F, db, code, tok, patch, uid, false).then(function(d){ mine = d; try{ localStorage.setItem(KEY, tok); }catch(e){} msg = { k: "ok", h: esc(okText) }; history.replaceState(null, "", "?m=" + code + "&t=" + tok); })
+    var hold = pendingPriv; pendingPriv = null;
+    regSaveEntry(F, db, code, tok, patch, uid, false).then(function(d){ mine = d; try{ localStorage.setItem(KEY, tok); }catch(e){} history.replaceState(null, "", "?m=" + code + "&t=" + tok);
+      var job;
+      if(!hold) job = Promise.resolve(privMine);
+      else if(!hold.consent || (!hold.idNo && !hold.cell)) job = hold.loaded ? regSavePrivate(F, db, code, tok, "", "", uid, false) : Promise.resolve(privMine);
+      else job = regSavePrivate(F, db, code, tok, hold.idNo, hold.cell, uid, true);
+      return job.then(function(pv){ privMine = pv; privTried = tok; privLoaded = true; draft = null; msg = { k: "ok", h: esc(okText) }; }, function(){ msg = { k: "ok", h: esc(okText) + " Your entry is saved, but the ID or cell number could not be stored. Try again or leave them blank." }; }); })
       .catch(function(e){ if(!mine) tok = ""; msg = { k: "err", h: esc(/permission/i.test(e.message) ? "Could not save – registration may have closed or the squad filled up. Reload and try again." : e.message) }; })
       .then(function(){ busy = false; paint(); window.scrollTo(0, 0); });
   }
