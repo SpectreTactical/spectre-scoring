@@ -36,6 +36,8 @@ ul.shooters li{border-top:1px solid var(--border);padding:8px 0;display:flex;gap
 @media screen{.paper:has(.shqr){padding-bottom:40mm}}
 #pdfStage{position:fixed;left:-10000px;top:0;width:794px;background:#fff;padding:38px}
 .err{color:#a00}
+.qbadge{display:inline-block;margin-left:6px;padding:2px 8px;border-radius:12px;background:#e8eefb;border:1px solid #9fb3dc;color:#1f3a73;font-weight:700;font-size:.78em;vertical-align:middle}
+.qpass{color:#1f7a35;font-weight:700}.qfail{color:#b3261e;font-weight:700}.qover{color:#b3261e;font-weight:700}
 .robadge{display:inline-block;margin-top:6px;padding:4px 10px;border-radius:14px;background:#fff3cd;border:1px solid #e0c060;color:#5a4500;font-weight:700;font-size:.85em}
 .rosrc{font-size:.85em;color:var(--muted);line-height:1.4}
 /* results pack (same look as the app pack) */
@@ -1176,15 +1178,15 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
     app.innerHTML = '<div class="card">Loading the published matches…</div>';
     getList().then(function(list){
       var ys = years(); YEAR = (y && ys.indexOf(y) >= 0) ? y : (y || defYear());
-      navY(); var rows = list.filter(function(m){ return yearOf(m) === YEAR; });
+      navY(); var rows = list.filter(function(m){ return yearOf(m) === YEAR; }), nClub = rows.filter(function(m){ return !isQual(m); }).length, nQual = rows.length - nClub;
       app.innerHTML = '<div class="card"><h2 style="margin-top:0">Club shoots</h2>' +
         (ys.length ? '<div class="yrs" id="yrs">' + ys.map(function(x){ return '<a href="#y=' + encodeURIComponent(x) + '"' + (x === YEAR ? ' class="on"' : "") + '>' + e(x) + '</a>'; }).join("") + '</div>' : "") +
         '<label for="lq"><b>Find your name or a match</b></label><input type="search" id="lq" placeholder="Type part of a name" autocomplete="off" value="' + e(q || "") + '">' +
         '<div class="scope"><label><input type="radio" name="sc" value="y"' + (ALLY ? "" : " checked") + '> ' + e(YEAR) + ' only</label><label><input type="radio" name="sc" value="a"' + (ALLY ? " checked" : "") + '> All years</label></div>' +
         '<ul class="hits" id="hits"></ul></div>' +
-        '<div class="card" id="yrCard"><h3 style="margin:0 0 4px">' + e(YEAR) + ' <span class="small muted">· ' + rows.length + ' club shoot' + (rows.length === 1 ? "" : "s") + '</span></h3>' + (rows.length ? '<a class="stbtn" id="stLink" href="#y=' + encodeURIComponent(YEAR) + '&st=1">&#127942; ' + e(YEAR) + ' season standings</a>' : "") + (rows.length ? '<ul class="matches" id="mList">' + rows.map(function(m){
+        '<div class="card" id="yrCard"><h3 style="margin:0 0 4px">' + e(YEAR) + ' <span class="small muted">· ' + nClub + ' club shoot' + (nClub === 1 ? "" : "s") + (nQual ? ' · ' + nQual + ' qualifier' + (nQual === 1 ? "" : "s") : "") + '</span></h3>' + (nClub ? '<a class="stbtn" id="stLink" href="#y=' + encodeURIComponent(YEAR) + '&st=1">&#127942; ' + e(YEAR) + ' season standings</a>' : "") + (rows.length ? '<ul class="matches" id="mList">' + rows.map(function(m){
           var mo = /^\d{4}-(\d{2})-(\d{2})/.exec(String(m.date || ""));
-          return '<li><div class="mon">' + (mo ? MON[+mo[1] - 1] + '<span>' + (+mo[2]) + '</span>' : "–") + '</div><div class="grow"><b>' + e(m.matchName) + '</b><br><span class="small muted">' + e(m.date) + (m.venue ? ' · ' + e(m.venue) : "") + ' · ' + e(m.shooters) + ' shooters · ' + (+m.stages === 0 ? 'results only' : e(m.stages) + ' stages') + '</span></div><a class="btn" href="#m=' + encodeURIComponent(m.id) + '" data-m="' + e(m.id) + '">Open</a></li>'; }).join("") + '</ul>' : '<p class="muted">No club shoots published for ' + e(YEAR) + ' yet.</p>') + '</div>';
+          return '<li><div class="mon">' + (mo ? MON[+mo[1] - 1] + '<span>' + (+mo[2]) + '</span>' : "–") + '</div><div class="grow"><b>' + e(m.matchName) + '</b>' + (isQual(m) ? '<span class="qbadge">Qualifier</span>' : "") + '<br><span class="small muted">' + e(m.date) + (m.venue ? ' · ' + e(m.venue) : "") + ' · ' + e(m.shooters) + ' shooters · ' + (isQual(m) ? 'pass / fail · not counted in standings' : +m.stages === 0 ? 'results only' : e(m.stages) + ' stages') + '</span></div><a class="btn" href="#m=' + encodeURIComponent(m.id) + '" data-m="' + e(m.id) + '">Open</a></li>'; }).join("") + '</ul>' : '<p class="muted">No club shoots published for ' + e(YEAR) + ' yet.</p>') + '</div>';
       var inp = document.getElementById("lq"), tok = 0;
       var run = function(){ var t = inp.value.trim().toLowerCase(), my = ++tok, hits = document.getElementById("hits"), card = document.getElementById("yrCard");
         if(t.length < 2){ hits.innerHTML = ""; card.style.display = ""; return; }
@@ -1195,6 +1197,8 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
           var out = [];
           scope.forEach(function(m, i){ var mm = (m.matchName + " " + m.date + " " + (m.venue || "")).toLowerCase().indexOf(t) >= 0;
             if(mm) out.push('<li><div class="grow"><b>' + e(m.matchName) + '</b> <span class="small muted">' + e(m.date) + '</span></div><a class="btn" href="#m=' + encodeURIComponent(m.id) + '">Open</a></li>');
+            if(isQual(ds[i])) (ds[i].results || []).forEach(function(r){ if(String(r.name || "").toLowerCase().indexOf(t) < 0) return;
+              out.push('<li><div class="grow"><b>' + e(r.name) + '</b><br><span class="small muted">' + e(m.matchName) + ' · ' + e(m.date) + ' · qualifier ' + e(r.status === "INCOMPLETE" ? "DNF" : r.status) + (r.points != null ? ', ' + e(r.points) + ' pts' : "") + '</span></div><a class="btn" href="#m=' + encodeURIComponent(m.id) + '">Results</a></li>'); });
             roRows(ds[i]).forEach(function(r){ if(r.name.toLowerCase().indexOf(t) < 0 && String(r.src || '').toLowerCase().indexOf(t) < 0) return;
               out.push('<li><div class="grow"><b>' + e(r.name) + '</b><br><span class="small muted">' + e(m.matchName) + ' · ' + e(m.date) + ' · ' + e(r.disc) + ' place ' + e(r.place) + ', ' + e(r.val) + '</span></div><a class="btn" href="#m=' + encodeURIComponent(m.id) + '">Results</a></li>'); });
             ((ds[i] && ds[i].sheets) || []).forEach(function(s){ if((s.sh.name + " " + s.sh.no).toLowerCase().indexOf(t) < 0) return;
@@ -1259,6 +1263,31 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
      data/main = { v, kind:"results", match, source:{ title, by, note }, standings:"avg", sheets:[], tables:[],
        disciplines:[{ id, t, unit, high (true = highest wins), col, rows:[{ name, src, val, cls }] }] } */
   function isRO(m){ return m && m.kind === "results"; }
+  /* ---------- qualifier records (Spectre Qualifier app, e.g. FAM TPC) ----------
+     archive/{id} index may carry kind:"qualifier"; data/main = { v, kind:"qualifier", publishedAt, match:{ name, date, venue },
+       qualifier:{ id, version, name, short, rounds, maxPoints, minPoints, zones:[{ id, label, points }], checks:[{ key, label, par }] },
+       results:[{ name, division, pf, category, class, squad, status, points, hits:{ zone: n }, par:[{ key, flag, time }], reasons }], sheets:[] }
+     Listed with the club shoots, but NEVER counted in the season standings (qualifier scoring is pass/fail, not match points).
+     No e-mail, ID, cell or member numbers; no correction history. */
+  function isQual(m){ return !!m && m.kind === "qualifier"; }
+  function showQual(m){
+    var q = m.qualifier || {}, ck = q.checks || [], zs = q.zones || [], rs = m.results || [];
+    var np = rs.filter(function(r){ return r.status === "PASS"; }).length, nf = rs.filter(function(r){ return r.status === "FAIL"; }).length;
+    var res = function(r){ return r.status === "PASS" ? '<span class="qpass">PASS</span>' : r.status === "FAIL" ? '<span class="qfail">FAIL</span>' : '<span class="muted">DNF</span>'; };
+    app.innerHTML = head(m) + '<div class="card"><span class="robadge">Qualifier · not counted in the season standings</span>' +
+      '<p style="margin:8px 0 0"><b>' + e(q.name || "Qualifier") + '</b></p><p class="small muted" style="margin:2px 0 0">' + zs.map(function(z){ return e(z.label) + " " + e(z.points); }).join(" · ") + ' · ' + e(q.rounds) + ' rounds · max ' + e(q.maxPoints) + ' · <b>pass ' + e(q.minPoints) + '+ points and within par on every stage</b>. Over par on any stage fails, whatever the points.</p>' +
+      '<p class="small" style="margin:6px 0 0">' + rs.length + ' shooters · ' + np + ' pass · ' + nf + ' fail' + (rs.length - np - nf ? ' · ' + (rs.length - np - nf) + ' not finished' : "") + '</p></div>' +
+      '<div class="card"><h3 style="margin:0 0 4px">Results</h3><div class="scroll"><table class="restable" id="qualTbl"><tr><th>Shooter</th><th>Division / category</th>' + ck.map(function(c, i){ return '<th title="' + e(c.label) + ' · par ' + e(c.par) + ' s">S' + (i + 1) + '<br><span class="small muted">' + e(typeof c.par === "number" ? c.par.toFixed(1) : c.par) + ' s</span></th>'; }).join("") +
+      zs.map(function(z){ return '<th>' + e(String(z.label || z.id).split(" ")[0]) + '</th>'; }).join("") + '<th style="text-align:right">Points</th><th>Result</th></tr>' +
+      rs.map(function(r){ var pm = {}; (r.par || []).forEach(function(x){ pm[x.key] = x; });
+        return '<tr><td style="white-space:normal"><b>' + e(r.name) + '</b></td><td>' + e([r.division, r.pf, r.category].filter(Boolean).join(" · ")) + '</td>' +
+          ck.map(function(c){ var x = pm[c.key] || {}; return '<td' + (x.flag === "over" ? ' class="qover"' : "") + '>' + (x.flag === "over" ? "OVER" : x.flag === "within" ? "✓" : "–") + '</td>'; }).join("") +
+          zs.map(function(z){ return '<td>' + (r.hits && r.hits[z.id] != null ? e(r.hits[z.id]) : "–") + '</td>'; }).join("") +
+          '<td style="text-align:right">' + (r.points == null ? "–" : '<b>' + e(r.points) + '</b> / ' + e(q.maxPoints)) + '</td><td>' + res(r) + '</td></tr>' +
+          ((r.reasons || []).length ? '<tr><td></td><td colspan="' + (4 + ck.length + zs.length - 1) + '" class="small muted" style="white-space:normal">' + r.reasons.map(e).join(" · ") + '</td></tr>' : ""); }).join("") + '</table></div>' +
+      '<p class="small muted">✓ within par · OVER = over par (fails the course) · DNF = not finished. Par per stage = combined time of its strings.</p></div>';
+    adminDelWire(m.id, m);
+  }
   function roPlaces(d){ var rs = d.rows.filter(function(r){ return r.val != null; }).sort(function(a, b){ return d.high ? b.val - a.val : a.val - b.val; });
     rs.forEach(function(r, i){ r.place = i > 0 && r.val === rs[i - 1].val ? rs[i - 1].place : i + 1; });
     rs.forEach(function(r){ r.tie = rs.filter(function(x){ return x.place === r.place; }).length > 1; });
@@ -1340,6 +1369,7 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
     app.innerHTML = '<div class="card">Loading…</div>';
     loadMatch(id).then(function(m){
       if(isRO(m)){ m.id = id; return showRO(m); }
+      if(isQual(m)){ m.id = id; return showQual(m); }
       app.innerHTML = head(m) + '<div class="card noprint"><button type="button" class="packbtn" id="packPdf">&#11015; Download results pack (PDF)<small>Overall, every stage and the score check &middot; A4 landscape, colour</small></button></div><div class="card"><label for="q"><b>Find your name</b></label><input type="search" id="q" placeholder="Type part of your name" value="' + e(q || "") + '" autocomplete="off"><ul class="shooters" id="shList"></ul></div>' +
         '<div class="card row"><a class="btn" href="#m=' + encodeURIComponent(id) + '&r=0">Full results</a><button type="button" id="allPdf">Download all score sheets (PDF)</button><button type="button" id="sqPdf">Squads &amp; range officers (PDF)</button></div>';
       var paint = function(){ var t = document.getElementById("q").value.trim().toLowerCase();
@@ -1462,14 +1492,18 @@ window.ROPACK={roPack:roPack,seasonPdf:seasonPdf,partPdf:partPdf,standings:stand
   function showStandings(y, b){
     app.innerHTML = '<div class="card">Working out the standings…</div>';
     getList().then(function(list){ YEAR = y || defYear(); navY();
-      var ms = list.filter(function(m){ return yearOf(m) === YEAR; }).slice().sort(function(a, c){ return String(a.date).localeCompare(String(c.date)); });
-      return Promise.all(ms.map(function(m){ return matchData(m.id).catch(function(){ return null; }); })).then(function(ds){
+      /* qualifiers are listed with the club shoots but never counted here (index kind, and again by the data's own kind) */
+      var ms = list.filter(function(m){ return yearOf(m) === YEAR && !isQual(m); }).slice().sort(function(a, c){ return String(a.date).localeCompare(String(c.date)); });
+      return Promise.all(ms.map(function(m){ return matchData(m.id).catch(function(){ return null; }); })).then(function(ds0){
+        var ds = ds0.filter(function(d){ return !isQual(d); }); ms = ms.filter(function(m, i){ return !isQual(ds0[i]); });
         var bestN = Math.max(0, Math.min(12, parseInt(b, 10) || 0)), rows = standings(ms, ds, bestN);
         var opts = '<option value="0"' + (bestN ? "" : " selected") + '>All shoots count</option>' + [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(function(n){ return '<option value="' + n + '"' + (bestN === n ? " selected" : "") + '>Best ' + n + ' of 12</option>'; }).join("");
         var mo = function(m){ var x = /^\d{4}-(\d{2})-(\d{2})/.exec(String(m.date || "")); return x ? MON[+x[1] - 1] + " " + (+x[2]) : e(m.date); };
         var h = '<div class="card"><div class="row"><div class="grow"><h2 style="margin:0">' + e(YEAR) + ' season standings</h2><div class="small muted">' + ms.length + ' club shoot' + (ms.length === 1 ? "" : "s") + ' published · ' + rows.length + ' shooters</div></div><a class="btn noprint" href="#y=' + encodeURIComponent(YEAR) + '">All ' + e(YEAR) + ' shoots</a></div>' +
           '<label class="noprint" for="bestN"><b>Counting</b></label><select id="bestN" class="noprint">' + opts + '</select>' +
           '<div class="how"><b>How points work.</b> Each club shoot gives match points out of 100 from the overall (all stages) result, all competitors together: on time-plus-penalties matches (lowest total wins, Spectre rules) the winner scores 100 and everyone else scores <i>winner’s total ÷ your total × 100</i>; on points matches it is <i>your total ÷ winner’s total × 100</i>. A shooter not ranked at a shoot (DNF, DQ or a missing stage) gets 0 for it. The season score is the sum of ' + (bestN ? 'each shooter’s best ' + bestN + ' shoots (struck-through scores are dropped)' : 'all their shoots') + '. Ties: more shoots, then the best single shoot.' + (ds.some(function(d){ return isRO(d) && !d.stageRes; }) ? ' <br><sup>R</sup> <b>Results-only shoots</b> (old paper results with separate handgun and long gun lists, no combined total): ' + roHow(ds.filter(function(d){ return isRO(d) && !d.stageRes; })[0]) + (ds.some(function(d){ return isRO(d) && (d.disciplines || []).length > 1; }) ? ' On two-discipline shoots, your points are the average of your two discipline scores, each out of 100, so a shooter only scores 100 for the shoot by winning both disciplines.' : '') : '') + (ds.some(function(d){ return isRO(d) && d.stageRes; }) ? ' <br><sup>R</sup> Shoots with stage results only are scored like any other time match, from the final time.' : '') + '</div></div>';
+        var nq = list.filter(function(m){ return yearOf(m) === YEAR && isQual(m); }).length + (ds0.length - ds.length);
+        if(nq) h += '<div class="card small muted" id="qualNote">' + nq + ' qualifier' + (nq === 1 ? "" : "s") + ' in ' + e(YEAR) + ' (e.g. ' + e((list.filter(function(m){ return yearOf(m) === YEAR && isQual(m); })[0] || {}).matchName || "FAM TPC") + '): qualifier, not counted in standings.</div>';
         if(!ms.length) h += '<div class="card muted">No club shoots published for ' + e(YEAR) + ' yet.</div>';
         else h += '<div class="card"><div class="scroll"><table class="restable stand"><tr><th>#</th><th>Shooter</th><th class="p">Season</th><th class="p">Shoots</th><th class="p">Avg %</th>' + ms.map(function(m){ return '<th class="p"><a href="#m=' + encodeURIComponent(m.id) + '">' + mo(m) + '</a></th>'; }).join("") + '</tr>' +
           rows.map(function(r){ var cells = ms.map(function(m){ var x = r.per[m.id]; if(!x) return '<td class="p muted">–</td>';
