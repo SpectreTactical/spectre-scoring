@@ -67,3 +67,21 @@ data model, migration, hit requirements and SVG renderer (the designer itself is
   (written only by the token holder or the organiser; only the organiser can list entries). Rules enforce slot limits, deadlines and field sizes.
 - Organiser rights belong to the anonymous Firebase login of the phone that created the registration – keep that phone/Home Screen app.
 - Tests: `t/test-rules-reg.js`, `t/test-reg-emulator.js` (emulators), `t/test-reg-live.js` (live project, TEST codes, needs the rules published).
+
+
+## Match directors (hosts) – not released until Gideon approves
+
+Approved match directors (intended: Gideon Joubert, Michael Nigrini, Robert Fourie, Glen Fourie) use a persistent club email/password login. A console-only `hosts/{uid}` allow-list grants the right to take the main phone on a live room or shooter registration someone else prepared. There is no mid-shoot handover: if another director already holds the claim, the app says so and refuses. Being the main phone does **not** grant access to opt-in ID or cell numbers (those stay `admins/` only).
+
+Directors also count as archive publishers (`isPub` is true for `hosts/{uid}` as well as `publishers/{uid}`), so they do not need a second console document to publish results. The box publisher profile stays on `publishers/` only and cannot take over a match.
+
+### Console steps at release (after each person has registered)
+
+For the **club** project (`spectre-scoring-5ddda`) and again for the **qualifier** project (`spectre-qualifier`):
+
+1. Each director signs up once with their club email and password (Match tab → Match director → Create a club login, or Sign in if they already have an archive account). They then tap Check status and send you the signed-in ID, or you read the Auth uid in the Firebase console (Authentication → Users).
+2. In Firestore, add a document `hosts/{thatUid}` (empty or `{ name: "Michael Nigrini" }` is enough). Do this by hand; the app cannot write `hosts/`.
+3. Repeat for Gideon, Michael, Robert and Glen, in both projects. Robert and Glen should be added to `hosts/` once they have registered; they become `admins/` only when Gideon says so (admin is what unlocks ID/cell).
+4. Existing `publishers/{uid}` docs can stay for the box publisher and any already-approved scoring phones. Directors do not need a `publishers/` doc.
+
+Rules in this folder are **not** published. Do not paste them into the console until Gideon approves a release.

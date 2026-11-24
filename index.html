@@ -1869,18 +1869,22 @@ function parsePackText(txt){
   return raw;
 }
 /* RO phone imports a stage pack: becomes an RO phone for that match */
-function applyStagePack(p, force){
+function applyStagePack(p, force, asMain){
   if(!Array.isArray(p.stages) || !Array.isArray(p.shooters)) throw new Error("This stage pack is damaged (no stages or shooters).");
   var other = S.matchId !== p.matchId, hasScores = Object.keys(S.scores).length > 0;
   if(other && hasScores && !force) return { needConfirm: "This phone holds " + Object.keys(S.scores).length + " score(s) for another match (" + S.match.name + "). Replace them with the new match? Export a backup first if unsure." };
-  if(S.role === "main" && !other && S.stages.length && !force) return { needConfirm: "This phone is the main phone for this match. Turn it into an RO phone for stage(s) " + p.stages.map(function(s){ return s.no; }).join(", ") + "?" };
+  if(!asMain && S.role === "main" && !other && S.stages.length && !force) return { needConfirm: "This phone is the main phone for this match. Turn it into an RO phone for stage(s) " + p.stages.map(function(s){ return s.no; }).join(", ") + "?" };
   var dev = S.device;
   if(other){ S = blankState(); S.device = dev; UNDO = []; saveUndo(); }
-  S.matchId = p.matchId; S.match = p.match; S.role = "ro";
+  S.matchId = p.matchId; S.match = p.match;
   p.stages.forEach(function(st){ var n = normalizeStage(st); n.no = st.no; var ex = stageById(n.id); if(ex) S.stages[S.stages.indexOf(ex)] = n; else S.stages.push(n); });
   renumber();
   p.shooters.forEach(function(sh){ var ex = shooterById(sh.id); if(ex) Object.assign(ex, sh); else S.shooters.push(clone(sh)); });
-  S.ro = { assigned: p.assigned || p.stages.map(function(s){ return s.id; }), main: p.from ? p.from.name : "", packId: p.packId, at: nowISO() };
+  if(asMain){ S.role = "main"; S.ro = null; delete S.device.roId; }
+  else {
+    S.role = "ro";
+    S.ro = { assigned: p.assigned || p.stages.map(function(s){ return s.id; }), main: p.from ? p.from.name : "", packId: p.packId, at: nowISO() };
+  }
   if(!S.device.name && p.forDevice) S.device.name = p.forDevice;
   saveState(); return { ok: true, stages: p.stages.length, shooters: p.shooters.length };
 }
@@ -2386,7 +2390,7 @@ function renderMatch(){
     var n = Object.keys(S.scores).length;
     h += '<div class="card"><h3>Send scores to the main phone</h3><p class="small">' + n + ' score(s) on this phone. Send the whole set every time – the main phone skips the ones it already has.</p><div class="grid2"><button type="button" class="primary" data-act="scorespack"' + (n ? "" : " disabled") + '>Share file</button><button type="button" data-act="scoresqr"' + (n ? "" : " disabled") + '>Show QR</button></div></div>';
   }
-  h += syncCard() + acctCard();
+  h += syncCard() + hostCard() + acctCard();
   if(!ro) h += rolesCard() + archiveCard();
   h += regCard();
   h += '<div class="card"><h3>Backup</h3>' + dpCardHTML() + cbCardHTML() + '<div class="grid2" style="margin-top:8px"><button type="button" data-act="backup">Save backup file</button><button type="button" data-act="import">Restore…</button></div><p class="small muted">The backup holds everything (match, stages, shooters, scores, signatures, audit trail). Keep one after each stage. Restore… reads a backup file back in (on this or another phone).</p></div>';
@@ -2402,7 +2406,7 @@ function renderMatch(){
   bind("mMd", function(){ S.match.md = this.value; saveState(); }); bind("mVenue", function(){ S.match.venue = this.value; saveState(); });
   bind("mScorer", function(){ S.match.scorer = this.value.trim(); saveState(); }); bind("mVenueTag", function(){ S.match.venueTag = this.value.trim(); saveState(); });
   bind("devName", function(){ S.device.name = this.value.trim(); saveState(); render(); });
-  syncBind(); acctBind(); regBind(); rolesBind(); archiveBind(); notesBind();
+  syncBind(); hostBind(); acctBind(); regBind(); rolesBind(); archiveBind(); notesBind();
   bind("pDark", function(){ PREFS.dark = this.checked; savePrefs(); render(); }); bind("pBig", function(){ PREFS.big = this.checked; savePrefs(); render(); }); bind("pNext", function(){ PREFS.autoNext = this.checked; savePrefs(); render(); });
 }
 function fmtWhen(iso){ if(!iso) return ""; var d = new Date(iso); return d.toLocaleDateString("en-ZA", { day: "numeric", month: "short" }) + " " + d.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit" }); }
@@ -2605,7 +2609,9 @@ function syncTransport(){
       putArchive: function(id, data){ return F.setDoc(F.doc(db, "archive", id), data, { merge: true }); },   /* merge: keeps the admin-written results pack text */
       putArchiveData: function(id, data){ return F.setDoc(F.doc(db, "archive", id, "data", "main"), data); },
       putVerify: function(tok, data){ return F.setDoc(F.doc(db, "verify", tok), data); },
-      isPublisher: function(uid){ return F.getDoc(F.doc(db, "publishers", uid)).then(function(d){ return d.exists(); }); },
+      isPublisher: function(uid){ return Promise.all([F.getDoc(F.doc(db, "publishers", uid)), F.getDoc(F.doc(db, "hosts", uid))]).then(function(ds){ return ds[0].exists() || ds[1].exists(); }); },
+      isHost: function(uid){ return F.getDoc(F.doc(db, "hosts", uid)).then(function(d){ return d.exists(); }); },
+      createPw: function(email, pw){ var go = function(){ return Au.createUserWithEmailAndPassword(auth, email, pw).then(function(c){ return c.user.uid; }); }; return auth.currentUser ? Au.signOut(auth).then(go) : go(); },
       findArchive: function(date){ return F.getDocs(F.query(F.collection(db, "archive"), F.where("date", "==", date), F.where("hidden", "==", false))).then(function(q){ return q.docs.map(function(d){ var x = d.data(); x.id = d.id; return x; }); }); },
       online: function(on){ return on ? F.enableNetwork(db) : F.disableNetwork(db); },
       F: F, db: db /* raw SDK handles: shooter registration (s-reg.js) */
@@ -2697,7 +2703,9 @@ function syncCreate(){
   return syncTransport().then(function(t){ return t.signIn().then(function(uid){ return t.getRoom(code).then(function(ex){ if(ex) throw new Error("Room code clash – try again.");
     var txt = JSON.stringify(syncPackObj()); if(txt.length > SYNC_PACK_MAX) throw new Error("The match is too large for a live sync room – use stage packs.");
     var h = syncHash();
-    return t.setRoom(code, { code: code, matchId: S.matchId, matchName: S.match.name, pack: txt, packHash: h, roles: rolesMap(), host: S.device.name || "Main", createdBy: uid, createdAt: nowISO(), updatedAt: nowISO() }).then(function(){
+    var room = { code: code, matchId: S.matchId, matchName: S.match.name, pack: txt, packHash: h, roles: rolesMap(), host: S.device.name || "Main", createdBy: uid, createdAt: nowISO(), updatedAt: nowISO() };
+    if(typeof hostOn === "function" && hostOn()) Object.assign(room, hostClaimFields());
+    return t.setRoom(code, room).then(function(){
       Object.assign(SYNC, { on: true, code: code, host: true, view: false, published: "", acked: {}, sigAcked: {}, packHash: h }); syncSave(); return syncStart().then(function(){ return code; }); }); }); }); });
 }
 function syncJoin(code, assigned, roId){
@@ -2721,6 +2729,29 @@ function syncJoin(code, assigned, roId){
 }
 function syncPeek(code){ code = syncCleanCode(code); if(!code) return Promise.reject(new Error("A match code has 6 letters/digits.")); return syncTransport().then(function(t){ return t.signIn().then(function(){ return t.getRoom(code); }); }).then(function(r){ if(!r) throw new Error("No live sync room " + code + "."); var p = JSON.parse(r.pack); p.__roles = r.roles || {}; return p; }); }
 function syncLeave(){ var wasView = SYNC.view; syncStop(); var n = syncPending().length; SYNCRT.results = null; Object.assign(SYNC, { on: false, code: "", host: false, view: false, acked: {}, sigAcked: {}, packHash: "" }); syncSave(); if(S.ro && !wasView) delete S.ro.live; if(!wasView) saveState(); syncPaint(); return n; }
+/* listed director: claim an unclaimed live room as the main phone (start of the day). No mid-shoot takeover. */
+function syncTake(code){
+  if(typeof hostOn !== "function" || !hostOn()) return Promise.reject(new Error("Sign in as a match director first."));
+  code = syncCleanCode(code); if(!code) return Promise.reject(new Error("A match code has 6 letters/digits."));
+  return syncTransport().then(function(t){ return t.signIn().then(function(uid){ return t.getRoom(code).then(function(room){
+    if(!room) throw new Error("No live sync room " + code + " (check the code and the signal).");
+    if(hostHeldByOther(room, uid)) throw new Error(hostHeldMsg(room));
+    var job = hostUidOf(room) === uid ? Promise.resolve() : t.setRoom(code, Object.assign({ updatedAt: nowISO() }, hostClaimFields()));
+    return job.then(function(){ return room; });
+  }).then(function(room){
+    if(S.matchId && room.matchId && S.matchId !== room.matchId && Object.keys(S.scores).length)
+      throw new Error("This phone holds scores for a different match (" + (S.match && S.match.name || "?") + "). Restore that match’s backup file first, or start a new match.");
+    var p = JSON.parse(room.pack);
+    applyStagePack(p, true, true);
+    Object.assign(SYNC, { on: true, code: code, host: true, view: false, published: "", acked: {}, sigAcked: {}, packHash: room.packHash || "" }); syncSave(); saveState();
+    return syncStart().then(function(){ return code; });
+  }); }); });
+}
+function syncRelease(){
+  if(!SYNC.on || !SYNC.host || !SYNC.code) return Promise.reject(new Error("This phone is not the main phone of a live room."));
+  if(typeof hostOn !== "function" || !hostOn()) return Promise.reject(new Error("Sign in as a match director to release the claim."));
+  return syncTransport().then(function(t){ return t.setRoom(SYNC.code, Object.assign({ updatedAt: nowISO() }, hostClearFields())); });
+}
 
 /* ---------- published results ---------- */
 var SYNC_RES_MAX = 400000;
@@ -2759,6 +2790,7 @@ function syncBoxInner(){
   if(!syncConfigured()) return '<p class="small muted">Live sync is not set up yet (no Firebase project). Use stage packs and scores packs (file or QR).</p>';
   if(!SYNC.on) return '<p class="small muted">Optional. Needs signal; scoring always works offline and catches up later. Stage and scores packs keep working.</p>' +
     (S.role !== "ro" ? '<button type="button" class="wide primary" id="syncCreateB"' + (S.stages.length ? "" : " disabled") + '>Create a live match room</button>' : "") +
+    (typeof hostOn === "function" && hostOn() ? '<button type="button" class="wide" style="margin-top:8px" id="syncTakeB">Open a room as match director…</button>' : "") +
     '<button type="button" class="wide" style="margin-top:8px" id="syncJoinB">Join a room with a match code…</button>';
   var n = syncPending().length, st = esc(SYNCRT.status === "connected" ? "connected" : SYNCRT.status === "connecting" ? "connecting…" : SYNCRT.status === "error" ? "error" : "offline – will catch up");
   if(SYNC.view) return '<div><b>Room ' + esc(SYNC.code) + '</b> · viewing results only (this phone does not score)</div><div class="small" style="margin:6px 0">Status: <b>' + st + '</b></div>' + syncBoardHTML() +
@@ -2767,14 +2799,17 @@ function syncBoxInner(){
     '<div class="small" style="margin:6px 0">Status: <b>' + esc(SYNCRT.status === "connected" ? "connected" : SYNCRT.status === "connecting" ? "connecting…" : SYNCRT.status === "error" ? "error" : "offline – will catch up") + '</b> · ' + n + ' pending' + (SYNCRT.err ? '<br><span class="muted">' + esc(SYNCRT.err) + '</span>' : "") + '</div>' +
     (SYNC.host ? '<div class="syncqr" id="syncQR"></div><p class="small muted">RO phones: Match → Live sync → Join, then scan this code or type ' + esc(SYNC.code) + '.</p>' : "") +
     (SYNC.host ? '<div class="grid2" style="margin-top:8px"><button type="button" id="syncPubB">Publish results</button><button type="button" id="syncUnpubB"' + (SYNC.published ? "" : " disabled") + '>Unpublish</button></div><p class="small muted">' + (SYNC.published ? "Results published " + esc(syncHHMM(SYNC.published)) + " – press again to update." : "Results are not shared until you press Publish.") + '</p>' : '<h4 style="margin:10px 0 4px">Published results</h4>' + syncBoardHTML()) +
+    (SYNC.host && typeof hostOn === "function" && hostOn() ? '<button type="button" class="wide" style="margin-top:8px" id="syncRelB">Release main phone…</button><p class="small muted">Release only if you prepared this room and another director will run the day. Scores stay on this phone.</p>' : "") +
     '<button type="button" class="wide danger" style="margin-top:8px" id="syncLeaveB">Leave room (turn live sync off)</button>';
 }
 function syncCard(){ return '<div class="card"><h3><label class="agree' + (SYNC.on ? " on" : "") + '" style="display:inline"><input type="checkbox" id="syncToggle"' + (SYNC.on ? " checked" : "") + (syncConfigured() ? "" : " disabled") + '> Live sync</label></h3><div id="syncBox">' + syncBoxInner() + '</div></div>'; }
 function syncBind(){
   var box = $("syncBox"); if(!box) return;
   box.onclick = function(e){ var b = e.target.closest("button"); if(!b) return;
-    if(b.id === "syncCreateB") needName().then(function(ok){ if(ok) syncCreate().then(function(c){ toast("Live room " + c + " created"); render(); }).catch(function(er){ alertMsg(er.message); }); });
+    if(b.id === "syncCreateB") needName().then(function(ok){ if(ok) syncCreate().then(function(c){ toast("Live room " + c + " created" + (hostOn() ? " – you are the main phone" : "")); render(); }).catch(function(er){ alertMsg(er.message); }); });
     if(b.id === "syncJoinB") syncJoinDialog();
+    if(b.id === "syncTakeB") syncTakeDialog();
+    if(b.id === "syncRelB") ask("Release the main phone on room " + SYNC.code + "? Another director can then take it. Scores stay on this phone.", { ok: "Release" }).then(function(ok){ if(!ok) return; syncRelease().then(function(){ toast("Main phone released"); render(); }).catch(function(er){ alertMsg(er.message); }); });
     if(b.dataset.rtab != null){ SYNCRT.resTab = +b.dataset.rtab; syncPaint(); }
     if(b.id === "syncPubB"){ var nc = (S.conflicts || []).length;
       (nc ? ask(nc + " merge conflict" + (nc > 1 ? "s are" : " is") + " not resolved – the published results use the scores currently on this phone. Publish anyway?", { ok: "Publish anyway" }) : Promise.resolve(true)).then(function(ok){ if(ok) syncPublishResults(false).then(function(at){ toast("Results published " + syncHHMM(at)); }).catch(function(er){ alertMsg(er.message); }); }); }
@@ -2813,6 +2848,25 @@ function syncJoinDialog(pre, preRo){ if(preRo) pre = pre + "-" + preRo;
     };
     if(pre && !busyMsg()) $("sjLook").click();
   })();
+}
+function syncTakeDialog(){
+  var o = $("overlay");
+  o.innerHTML = '<h2>Open a live room as match director</h2><p class="small muted">Use this at the start of the day if someone else prepared the room. If scoring has already started on another phone, restore that phone’s backup file on this phone first. You cannot take a room another director already holds.</p><label>Match code</label><input id="stCode" autocapitalize="characters" maxlength="8" placeholder="e.g. K7M2QX" style="text-transform:uppercase"><div class="grid2" style="margin-top:8px"><button type="button" class="primary" id="stGo">Take as main phone</button><button type="button" id="stClose">Cancel</button></div>';
+  o.hidden = false; window.scrollTo(0, 0);
+  $("stClose").onclick = function(){ o.hidden = true; o.innerHTML = ""; };
+  $("stGo").onclick = function(){
+    needName().then(function(ok){ if(!ok) return;
+      var code = $("stCode").value;
+      return syncTransport().then(function(t){ return t.signIn().then(function(uid){ return t.getRoom(syncCleanCode(code)).then(function(room){ return { uid: uid, room: room }; }); }); }).then(function(x){
+        if(!x.room) throw new Error("No live sync room " + syncCleanCode(code) + " (check the code and the signal).");
+        if(hostHeldByOther(x.room, x.uid)) throw new Error(hostHeldMsg(x.room));
+        var scores = Object.keys(S.scores).length;
+        var msg = "Take room " + syncCleanCode(code) + " (“" + ((function(){ try{ return JSON.parse(x.room.pack).match.name; }catch(e){ return x.room.matchName || "match"; } })()) + "”) as the main phone on this device?";
+        if(!scores) msg += "\n\nThis phone has no scores yet. The room holds the stages and shooters, not scores already entered on another phone. If scoring has started, restore that backup first.";
+        return ask(msg, { ok: "Take as main phone" }).then(function(ok2){ if(!ok2) return; return syncTake(code).then(function(c){ o.hidden = true; o.innerHTML = ""; toast("This phone is the main phone for room " + c); render(); }); });
+      }).catch(function(er){ if(er && er.message) alertMsg(er.message); });
+    });
+  };
 }
 function syncBoot(){
   syncLoad(); acctLoad();
@@ -2912,6 +2966,100 @@ function acctGo(){
     if(u && u.isAnonymous) return ask("Signing in switches this phone to your login's ID. This phone's own anonymous ID (and its cloud backups or archive approval, if any) is left behind. Scores on this phone stay. Carry on?", { ok: "Sign in" }).then(function(ok){ if(ok) return go(); });
     return go();
   }, function(er){ ACCTRT.msg = acctErr(er); render(); });
+}
+/* ===================== Match directors (hosts/{uid}) =====================
+   A small console-only allow-list of approved directors (Gideon, Michael, Robert, Glen once added).
+   Each uses a persistent club email/password login so a cleared browser does not lose the role.
+   A listed director may claim an unclaimed live room or registration as the main phone for the day,
+   or release their own claim. There is no mid-shoot takeover: if another director already holds it,
+   this phone is told who and cannot take it. Being the main phone does not grant ID or cell access. */
+var HOST_KEY = "spectreScoring.host";
+var HOST = { uid: "", email: "", name: "", ok: false, state: "" };   /* state: "", "waiting", "ok" */
+var HOSTRT = { busy: false, msg: "", view: "" };
+function hostLoad(){ try{ Object.assign(HOST, JSON.parse(localStorage.getItem(HOST_KEY) || "{}")); }catch(e){} }
+function hostSave(){ try{ localStorage.setItem(HOST_KEY, JSON.stringify({ uid: HOST.uid, email: HOST.email, name: HOST.name, ok: HOST.ok, state: HOST.state })); }catch(e){} }
+function hostOn(){ return !!(HOST.ok && HOST.uid); }
+function hostName(){ return String(HOST.name || HOST.email || "").replace(/@.*$/, "").trim().slice(0, 80); }
+function hostHeldMsg(d){ var n = String(d && d.hostName || "").trim(); return "This already has a main phone" + (n ? " (" + n + ")" : " (another director)") + ". They keep it until they release it. There is no mid-shoot handover."; }
+function hostClaimFields(){ return { hostUid: HOST.uid, hostName: hostName(), hostAt: nowISO() }; }
+function hostClearFields(){ return { hostUid: "", hostName: "", hostAt: "" }; }
+function hostUidOf(d){ return String(d && d.hostUid || ""); }
+function hostHeldByOther(d, uid){ var h = hostUidOf(d); return !!(h && h !== uid); }
+function isEffectiveHostDoc(d, uid){ uid = uid || HOST.uid; var h = hostUidOf(d); return !!(d && (h ? h === uid : d.createdBy === uid)); }
+function hostErr(er){ var c = String(er && er.code || ""); return /invalid-credential|wrong-password|user-not-found|invalid-email/.test(c) ? "That email and password do not match a club login." : /email-already-in-use/.test(c) ? "That email already has a club login – sign in instead." : /weak-password/.test(c) ? "Use a password of at least 8 characters." : /too-many-requests/.test(c) ? "Too many tries – wait a few minutes." : /network|unavailable|offline/.test(c) ? "No internet connection – try again when online." : /operation-not-allowed/.test(c) ? "Email sign-in is not switched on (Firebase console)." : (er && er.message || String(er)); }
+function hostIsRoEmail(email){ return /@ro\.spectre\.local$/i.test(String(email || "")); }
+function hostRefresh(){
+  if(!syncConfigured()) return Promise.resolve();
+  return syncTransport().then(function(t){ return t.user().then(function(u){
+    if(!u || u.isAnonymous || hostIsRoEmail(u.email)){
+      if(HOST.uid){ HOST = { uid: "", email: "", name: HOST.name || "", ok: false, state: "" }; hostSave(); }
+      return;
+    }
+    HOST.uid = u.uid; HOST.email = String(u.email || HOST.email || "");
+    return t.isHost(u.uid).then(function(ok){ HOST.ok = !!ok; HOST.state = ok ? "ok" : "waiting"; hostSave(); });
+  }); }).catch(function(){ /* offline: keep last known state */ });
+}
+function hostStatusText(){ return HOST.state === "ok" ? "This phone is signed in as a match director." : HOST.state === "waiting" ? "Signed in, but this account is not on the match director list yet. Ask the club admin to add it in the Firebase console (Firestore › hosts)." : ""; }
+function hostCard(){
+  var h = '<div class="card" id="hostCard"><h3>Match director</h3>', m = HOSTRT.msg ? '<div class="small" id="hostMsg" style="margin:6px 0"><b>' + esc(HOSTRT.msg) + '</b></div>' : "";
+  if(!syncConfigured()) return h + '<p class="small muted">Not available in this build.</p></div>';
+  if(HOST.uid){
+    h += '<div>Signed in as <b id="hostWho">' + esc(hostName() || HOST.email) + '</b>' + (HOST.email ? ' <span class="small muted">(' + esc(HOST.email) + ')</span>' : "") + '</div>';
+    h += '<div class="small" id="hostState" data-st="' + esc(HOST.state) + '">' + esc(hostStatusText()) + '</div>' + m;
+    h += '<p class="small muted">A listed director can open a room or registration someone else prepared, and take the main phone for the day. If scoring has already started on another phone, restore that phone’s backup file on this phone first. This role does not grant access to ID or cell numbers.</p>';
+    h += '<div class="grid2"><button type="button" id="hostCheck">Check status</button><button type="button" class="danger" id="hostOut">Sign out…</button></div>';
+    return h + '</div>';
+  }
+  var v = HOSTRT.view;
+  h += '<p class="small muted">For approved match directors. Sign in with your club email and password so this phone can take the main role on a match you did not create. ID and cell numbers stay admin-only.</p>' + m;
+  if(v === "in" || v === "new") h +=
+    (v === "new" ? '<label>Your name</label><input id="hostNm" maxlength="80" autocomplete="name" value="' + esc(HOST.name || "") + '">' : "") +
+    '<label>Email</label><input id="hostEmail" type="email" maxlength="120" autocapitalize="off" autocomplete="username" placeholder="you@example.com">' +
+    '<label>Password' + (v === "new" ? " (8+ characters)" : "") + '</label><input id="hostPw" type="password" autocomplete="' + (v === "new" ? "new-password" : "current-password") + '">' +
+    (v === "new" ? '<label>Password again</label><input id="hostPw2" type="password" autocomplete="new-password">' : "") +
+    '<div class="grid2" style="margin-top:8px"><button type="button" class="primary" id="hostGo">' + (v === "new" ? "Create login" : "Sign in") + '</button><button type="button" id="hostBack">Cancel</button></div>';
+  else h += '<div class="grid2"><button type="button" class="primary" id="hostShowIn">Sign in</button><button type="button" id="hostShowNew">Create a club login</button></div>';
+  return h + '</div>';
+}
+function hostBusy(p){ HOSTRT.busy = true; var b = $("hostGo"); if(b) b.disabled = true; return p.then(function(){ HOSTRT.busy = false; render(); }, function(er){ HOSTRT.busy = false; HOSTRT.msg = hostErr(er); render(); }); }
+function hostBind(){
+  var c = $("hostCard"); if(!c) return;
+  c.onclick = function(e){ var b = e.target.closest("button"); if(!b || HOSTRT.busy) return;
+    if(b.id === "hostShowIn" || b.id === "hostShowNew"){ HOSTRT.view = b.id === "hostShowIn" ? "in" : "new"; HOSTRT.msg = ""; render(); }
+    else if(b.id === "hostBack"){ HOSTRT.view = ""; HOSTRT.msg = ""; render(); }
+    else if(b.id === "hostGo") hostGo();
+    else if(b.id === "hostCheck"){ HOSTRT.msg = ""; hostBusy(hostRefresh().then(function(){ HOSTRT.msg = hostStatusText() || "Not signed in."; })); }
+    else if(b.id === "hostOut") ask("Sign out as match director? This phone will no longer be able to take a room or registration as main until you sign in again. Scores on this phone stay.", { ok: "Sign out", okClass: "danger" }).then(function(ok){
+      if(!ok) return; hostBusy(syncTransport().then(function(t){ if(SYNC.on) syncStop(true); return t.signOut(); }).then(function(){
+        HOST = { uid: "", email: "", name: HOST.name || "", ok: false, state: "" }; hostSave(); HOSTRT.view = ""; HOSTRT.msg = "Signed out.";
+        if(typeof ACCT !== "undefined"){ ACCT = { uid: "", user: "", name: "", active: false, state: "" }; if(typeof acctSave === "function") acctSave(); }
+        if(SYNC.on) syncStart();
+      }));
+    });
+  };
+}
+function hostGo(){
+  var v = HOSTRT.view, email = ($("hostEmail").value || "").trim(), pw = $("hostPw").value || "", nm = v === "new" ? ($("hostNm").value || "").replace(/\s+/g, " ").trim().slice(0, 80) : (HOST.name || "");
+  HOSTRT.msg = "";
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || hostIsRoEmail(email)){ HOSTRT.msg = "Enter your club email address (not an RO login)."; return render(); }
+  if(v === "new"){
+    if(!nm){ HOSTRT.msg = "Type your name."; return render(); }
+    if(/\d{6,}|@/.test(nm)){ HOSTRT.msg = "Name only, please – no numbers or e-mail."; return render(); }
+    if(pw.length < 8){ HOSTRT.msg = "Use a password of at least 8 characters."; return render(); }
+    if(pw !== $("hostPw2").value){ HOSTRT.msg = "The two passwords differ."; return render(); }
+    return hostBusy(syncTransport().then(function(t){ return t.createPw(email, pw).then(function(uid){
+      HOST = { uid: uid, email: email, name: nm, ok: false, state: "waiting" }; hostSave();
+      return hostRefresh().then(function(){ HOSTRT.view = ""; HOSTRT.msg = HOST.ok ? "Signed in as a match director." : "Login created. Ask the club admin to add this account in Firestore › hosts, then tap Check status."; });
+    }); }));
+  }
+  if(!pw){ HOSTRT.msg = "Type your password."; return render(); }
+  var go = function(){ return hostBusy(syncTransport().then(function(t){ if(SYNC.on) syncStop(true); return t.signInPw(email, pw); }).then(function(){
+    if(nm) HOST.name = nm; return hostRefresh();
+  }).then(function(){ HOSTRT.view = ""; HOSTRT.msg = HOST.uid ? hostStatusText() : "Signed in."; if(SYNC.on) syncStart(); })); };
+  return syncTransport().then(function(t){ return t.user(); }).then(function(u){
+    if(u && u.isAnonymous) return ask("Signing in switches this phone to your club login. This phone’s own anonymous ID (and its cloud backups or archive approval, if any) is left behind. Scores on this phone stay. Carry on?", { ok: "Sign in" }).then(function(ok){ if(ok) return go(); });
+    return go();
+  }, function(er){ HOSTRT.msg = hostErr(er); render(); });
 }
 /* ===================== Shooter registration – shared by the scoring app (organiser) and register.html (shooters) =====================
    regs/{CODE}                 match registration (name, date, divisions, squads {id:{n,max}}, closesMs, closed) – no personal data
@@ -3030,8 +3178,9 @@ function regWatch(){
   if(!REG.code || REGRT.code === REG.code && REGRT.unsub.length) return;
   regUnwatch(); REGRT.code = REG.code;
   regT().then(function(t){ var F = t.F, db = t.db, code = REG.code;
+    REGRT.uid = t.myUid;
     REGRT.unsub.push(F.onSnapshot(F.doc(db, "regs", code), function(d){ REGRT.reg = d.exists() ? d.data() : null; regPaint(); }, regErr));
-    REGRT.unsub.push(F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ REGRT.entries = q.docs.map(function(d){ var e = d.data(); e.tok = d.id; return e; }); regPaint(); }, regErr));
+    REGRT.unsub.push(F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ REGRT.entries = q.docs.map(function(d){ var e = d.data(); e.tok = d.id; return e; }); REGRT.err = ""; regPaint(); }, function(e){ REGRT.entries = []; if(/permission/i.test(String(e && e.message))){ REGRT.err = ""; regPaint(); } else regErr(e); }));
   }).catch(regErr);
 }
 function regUnwatch(){ REGRT.unsub.forEach(function(u){ try{ u(); }catch(e){} }); REGRT.unsub = []; REGRT.code = ""; }
@@ -3042,6 +3191,18 @@ function regInner(){
   if(!syncConfigured()) return '<p class="small muted">Needs the Firebase project (same as live sync).</p>';
   if(!REG.code) return '<p class="small muted">Shooters register online with one link or QR code: name, member number, division, power factor, class, category and squad. Squads lock when full; entries close at the deadline. Then import them here as shooters.</p><button type="button" class="wide primary" id="regNewB">Create a registration…</button><button type="button" class="wide" style="margin-top:8px" id="regOpenB">Open an existing one by code…</button>';
   var r = REGRT.reg; if(!r) return '<p class="small">Registration <b>' + esc(REG.code) + '</b> · ' + (REGRT.err ? '<span class="muted">' + esc(REGRT.err) + '</span>' : "loading…") + '</p><button type="button" class="wide" id="regForgetB">Forget on this phone</button>';
+  var myUid = REGRT.uid || (SYNCRT.t && SYNCRT.t.uid && SYNCRT.t.uid()) || (typeof HOST !== "undefined" && HOST.uid) || "";
+  var canOrg = isEffectiveHostDoc(r, myUid) || (r.createdBy && REGRT.entries && REGRT.entries.length);
+  /* if we cannot list entries, show claim / held message instead of the organiser tools */
+  if(typeof hostOn === "function" && !isEffectiveHostDoc(r, myUid) && !REGRT.entries.length){
+    var held = hostHeldByOther(r, myUid);
+    var h0 = '<div><b>' + esc(r.name) + '</b> · ' + esc(r.date) + ' · code ' + esc(REG.code) + '</div>';
+    if(held) h0 += '<div class="msg warn" id="regHeld">' + esc(hostHeldMsg(r)) + '</div>';
+    else if(hostOn()) h0 += '<p class="small">This registration was created on another phone and is not claimed yet.</p><button type="button" class="wide primary" id="regTakeB">Take as match director…</button>';
+    else h0 += '<p class="small muted">This registration was created on another phone. Sign in as a match director to take it for the day.</p>';
+    h0 += '<button type="button" class="wide" style="margin-top:8px" id="regForgetB">Forget on this phone</button>';
+    return h0;
+  }
   var act = REGRT.entries.filter(function(e){ return e.status === "active"; }), open = regIsOpen(r), cap = 0, link = regLink(REG.code);
   var sq = regSquadIds(r).map(function(id){ var n = act.filter(function(e){ return e.squad === id; }).length; cap += r.squads[id].max; return '<li>' + esc(r.squads[id].n) + ': <b>' + n + '/' + r.squads[id].max + '</b>' + (n >= r.squads[id].max ? " · full" : "") + '</li>'; }).join("");
   var h = '<div><b>' + esc(r.name) + '</b> · ' + esc(r.date) + ' · code ' + esc(REG.code) + '</div>' +
@@ -3055,6 +3216,7 @@ function regInner(){
     regEntriesSorted().map(function(e){ var gone = e.status !== "active";
       return '<li class="row" style="' + (gone ? "opacity:.55" : "") + '"><span class="grow"><b>' + esc(e.first + " " + e.last) + '</b>' + (gone ? " · " + esc(e.status) : "") + '<br>' + esc([r.squads[e.squad] ? r.squads[e.squad].n : e.squad, regDivsText(e), e.cls, e.cat, e.visitor ? "Visitor" : e.member ? "SWPC " + e.member : ""].filter(Boolean).join(" · ")) + (e.email ? '<br><span class="muted">' + esc(e.email) + '</span>' : "") + '</span>' +
         (gone ? (e.status === "removed" ? '<button type="button" class="slim" data-regrestore="' + e.tok + '">Restore</button>' : "") : regRoTick(e) + '<label class="agree' + (e.paid ? " on" : "") + '" style="margin:0 6px 0 0"><input type="checkbox" data-regpaid="' + e.tok + '"' + (e.paid ? " checked" : "") + '> Paid</label><button type="button" class="slim danger" data-regdel="' + e.tok + '">Remove</button>') + '</li>'; }).join("") + '</ul></details>' +
+    (typeof hostOn === "function" && hostOn() && hostUidOf(r) === (HOST.uid || "") ? '<button type="button" class="wide" style="margin-top:8px" id="regRelB">Release main phone…</button><p class="small muted">Release only if you prepared this registration and another director will run the day.</p>' : "") +
     '<button type="button" class="wide" style="margin-top:10px" id="regForgetB">Forget on this phone</button><p class="small muted">Forgetting only removes it from this phone; the registration stays online. Keep the code ' + esc(REG.code) + ' to reopen it here.</p>';
   return h;
 }
@@ -3069,6 +3231,8 @@ function regBind(){
   box.onclick = function(e){ var b = e.target.closest("button"); if(!b) return;
     if(b.id === "regNewB") regForm(null);
     if(b.id === "regOpenB") ask("Registration code", { input: true, required: true, ok: "Open" }).then(function(v){ if(v){ regOpenCode(v); regPaint(); } });
+    if(b.id === "regTakeB") regClaim(REG.code).then(function(){ toast("This phone is the organiser for " + REG.code); regUnwatch(); regWatch(); regPaint(); }).catch(function(e){ alertMsg(e.message); });
+    if(b.id === "regRelB") ask("Release the main phone on registration " + REG.code + "? Another director can then take it.", { ok: "Release" }).then(function(ok){ if(!ok) return; return regRelease().then(function(){ toast("Main phone released"); regPaint(); }); }).catch(function(e){ alertMsg(e.message); });
     if(b.id === "regEditB") regForm(REGRT.reg);
     if(b.id === "regCopyB"){ var i = $("regLinkI"); i.select(); (navigator.clipboard ? navigator.clipboard.writeText(i.value) : Promise.reject()).then(function(){ toast("Link copied"); }, function(){ document.execCommand && document.execCommand("copy"); toast("Link copied"); }); }
     if(b.id === "regShareB"){ var l = regLink(REG.code); if(navigator.share) navigator.share({ title: REGRT.reg.name + " – registration", url: l }).catch(function(){}); else { $("regLinkI").select(); toast("Copy the link"); } }
@@ -3146,11 +3310,29 @@ function regCreate(body, code){
   code = code || syncNewCode();
   return regT().then(function(t){ return t.F.getDoc(t.F.doc(t.db, "regs", code)).then(function(d){ if(d.exists()) throw new Error("Code clash – try again.");
     var data = Object.assign({ code: code, closed: false, createdBy: t.myUid, createdAt: regNowISO() }, body);
+    if(typeof hostOn === "function" && hostOn()) Object.assign(data, hostClaimFields());
     /* batch: rules see the registration doc (getAfter is not used for counts create, so create the reg first) */
     return t.F.setDoc(t.F.doc(t.db, "regs", code), data).then(function(){ return regCreateOrUpdate(code, data, Object.keys(data.squads)); });
   }).then(function(){ REG = { code: code }; regSave(); REGRT.reg = null; REGRT.entries = []; regUnwatch(); regWatch(); return code; }); });
 }
 function regOpenCode(code){ code = syncCleanCode(code); if(!code) return; regUnwatch(); REG = { code: code }; regSave(); regWatch(); }
+
+function regClaim(code){
+  code = syncCleanCode(code); if(!code) return Promise.reject(new Error("Enter the registration code."));
+  if(typeof hostOn !== "function" || !hostOn()) return Promise.reject(new Error("Sign in as a match director first."));
+  return regT().then(function(t){ return t.F.getDoc(t.F.doc(t.db, "regs", code)).then(function(d){
+    if(!d.exists()) throw new Error("No registration " + code + ".");
+    var r = d.data();
+    if(hostHeldByOther(r, t.myUid)) throw new Error(hostHeldMsg(r));
+    if(hostUidOf(r) === t.myUid){ REG = { code: code }; regSave(); return code; }
+    return t.F.setDoc(t.F.doc(t.db, "regs", code), Object.assign({}, r, hostClaimFields(), { updatedAt: regNowISO() })).then(function(){ REG = { code: code }; regSave(); return code; });
+  }); });
+}
+function regRelease(){
+  if(!REG.code) return Promise.reject(new Error("No registration is open on this phone."));
+  if(typeof hostOn !== "function" || !hostOn()) return Promise.reject(new Error("Sign in as a match director to release the claim."));
+  return regT().then(function(t){ return t.F.setDoc(t.F.doc(t.db, "regs", REG.code), Object.assign({}, REGRT.reg, hostClearFields(), { updatedAt: regNowISO() })); });
+}
 /* ===================== Split squads / move shooters (main phone) ===================== */
 var SPL = null, SPLIT_UNDO = null, SEL = null; /* SEL: null or {ids:{}} while multi-select is on */
 function squadNames(){ var m = {}; S.shooters.forEach(function(s){ m[s.squad || ""] = 1; }); return Object.keys(m).sort(function(a, b){ return String(a || "~").localeCompare(String(b || "~"), undefined, { numeric: true }); }); }
@@ -3821,13 +4003,13 @@ function boot(){
   $("fileAny").onchange = function(){ var f = this.files && this.files[0], inp = this; if(!f) return; var rd = new FileReader(); rd.onload = function(){ inp.value = ""; importFileText(String(rd.result || ""), f.name); }; rd.readAsText(f); };
   /* resume an unfinished entry after a reload */
   try{ var d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); if(d && stageById(d.stage) && shooterById(d.shooter) && d.draft){ U.stage = d.stage; U.shooter = d.shooter; U.draft = d.draft; U.editing = d.editing; U.screen = d.screen === "confirm" ? "confirm" : "entry"; U.tab = "score"; } }catch(e){}
-  syncBoot(); regLoad(); dpBoot(); cbBoot();
+  syncBoot(); hostLoad(); if(HOST.uid && syncConfigured()) hostRefresh().then(function(){ if(U.tab === "match") render(); }); regLoad(); dpBoot(); cbBoot();
   sigOpen().then(function(){ render(); });
   render();
   if(!S.device.name && !U.draft) setTimeout(function(){ if(!S.device.name) ask("Welcome to Spectre Scoring.\nName this phone (e.g. Main, RO Stage 2):", { input: true, ok: "Save", cancel: "Later", keepInput: true, checks: [{ label: "Large text (easier to read in sunlight)", on: !!PREFS.big, v: "big" }] }).then(function(v){ var bx = document.querySelector('#mExtra [data-i="0"]'); if(bx && !!bx.checked !== !!PREFS.big){ PREFS.big = !!bx.checked; savePrefs(); } if(v && v.trim()){ S.device.name = v.trim(); saveState(); } render(); }); }, 300);
   if("serviceWorker" in navigator && location.protocol !== "file:") setupUpdates();
 }
-window.SSS = { roTick: { on: roTickShooter, off: roUntickShooter, of: roOfShooter, name: roName }, get S(){ return S; }, U: U, calcScore: calcScore, stageResults: stageResults, matchResults: matchResults, overallViews: overallViews, regEntryDivs: typeof regEntryDivs !== "undefined" ? regEntryDivs : null, readDesignerFile: readDesignerFile, addStages: addStages, readShootersCSV: readShootersCSV, addShooters: addShooters, newScore: newScore, commitScore: commitScore, undoLast: undoLast, targetSpec: targetSpec, makeStagePack: makeStagePack, makeScoresPack: makeScoresPack, applyStagePack: applyStagePack, mergeScoresPack: mergeScoresPack, resolveConflict: resolveConflict, qrEncodePack: qrEncodePack, qrParse: qrParse, qrJoin: qrJoin, scanFeed: scanFeed, scanReset: scanReset, qrSVG: qrSVG, resultsCSV: resultsCSV, saveState: saveState, clearAll: clearAll, render: render, importFileText: importFileText, makeBackup: makeBackup, restoreBackup: restoreBackup, sigGet: sigGet, matchMethod: matchMethod, stageById: stageById, shooterById: shooterById, skey: skey, reg: { get state(){ return REG; }, rt: REGRT, create: regCreate, open: regOpenCode, toShooters: regToShooters, importNow: regImport, set: regOrgSet, update: regUpdate }, sync: { get state(){ return SYNC; }, publish: syncPublishResults, viewJoin: syncViewJoin, get results(){ return SYNCRT.results; }, snapshot: resultsSnapshot, rt: SYNCRT, create: syncCreate, join: syncJoin, leave: syncLeave, flush: syncFlush, pending: syncPending, onScores: syncOnScores, start: syncStart, label: syncLabel, configured: syncConfigured }, setS: function(x){ S = x; }, sheets: { data: sheetData }, roles: { add: roAdd, set: roSetStages, remove: roRemove, map: rolesMap, byId: roById, code: roCode, parse: roParseCode, officer: officerName }, archive: { publish: archivePublish, payload: archivePayload, url: archiveURL, progress: archiveProgress, checkPub: archiveCheckPub, rt: ARCHRT }, split: { plan: splitPlan, dialog: splitDialog, move: moveShooters, undo: undoSquads } };
+window.SSS = { roTick: { on: roTickShooter, off: roUntickShooter, of: roOfShooter, name: roName }, get S(){ return S; }, U: U, calcScore: calcScore, stageResults: stageResults, matchResults: matchResults, overallViews: overallViews, regEntryDivs: typeof regEntryDivs !== "undefined" ? regEntryDivs : null, readDesignerFile: readDesignerFile, addStages: addStages, readShootersCSV: readShootersCSV, addShooters: addShooters, newScore: newScore, commitScore: commitScore, undoLast: undoLast, targetSpec: targetSpec, makeStagePack: makeStagePack, makeScoresPack: makeScoresPack, applyStagePack: applyStagePack, mergeScoresPack: mergeScoresPack, resolveConflict: resolveConflict, qrEncodePack: qrEncodePack, qrParse: qrParse, qrJoin: qrJoin, scanFeed: scanFeed, scanReset: scanReset, qrSVG: qrSVG, resultsCSV: resultsCSV, saveState: saveState, clearAll: clearAll, render: render, importFileText: importFileText, makeBackup: makeBackup, restoreBackup: restoreBackup, sigGet: sigGet, matchMethod: matchMethod, stageById: stageById, shooterById: shooterById, skey: skey, reg: { get state(){ return REG; }, rt: REGRT, create: regCreate, open: regOpenCode, toShooters: regToShooters, importNow: regImport, set: regOrgSet, update: regUpdate }, sync: { get state(){ return SYNC; }, publish: syncPublishResults, viewJoin: syncViewJoin, get results(){ return SYNCRT.results; }, snapshot: resultsSnapshot, rt: SYNCRT, create: syncCreate, join: syncJoin, leave: syncLeave, flush: syncFlush, pending: syncPending, onScores: syncOnScores, start: syncStart, label: syncLabel, configured: syncConfigured }, setS: function(x){ S = x; }, sheets: { data: sheetData }, roles: { add: roAdd, set: roSetStages, remove: roRemove, map: rolesMap, byId: roById, code: roCode, parse: roParseCode, officer: officerName }, archive: { publish: archivePublish, payload: archivePayload, url: archiveURL, progress: archiveProgress, checkPub: archiveCheckPub, rt: ARCHRT }, host: { get state(){ return HOST; }, on: hostOn, refresh: hostRefresh, take: typeof syncTake === "function" ? syncTake : null, release: typeof syncRelease === "function" ? syncRelease : null, claimReg: typeof regClaim === "function" ? regClaim : null }, split: { plan: splitPlan, dialog: splitDialog, move: moveShooters, undo: undoSquads } };
 document.addEventListener("DOMContentLoaded", boot);
 
 /* updates: a new version (new sw.js build hash) installs in the background; the user is told and reloads when ready */

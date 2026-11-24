@@ -284,13 +284,37 @@ function indemPrint(reg, entries, perSquad, priv){
   }).then(function(u){ uid = u.uid;
     F.onSnapshot(F.doc(db, "regs", code), function(d){ reg = d.exists() ? d.data() : null; if(!reg) return fail("No registration " + code + ". Check the link with the match organiser."); paint(); }, function(e){ fail("Could not load the registration: " + e.message); });
     F.onSnapshot(F.collection(db, "regs", code, "counts"), function(q){ counts = {}; q.docs.forEach(function(d){ counts[d.id] = d.data().n; }); paint(); }, function(){});
-    if(ORG) F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ orgEntries = q.docs.map(function(d){ var e = d.data(); e.tok = d.id; return e; }); orgErr = ""; paint(); }, function(){ orgEntries = null; orgErr = "This page can only list the entries on the phone (and browser) that created the registration in Spectre Scoring."; paint(); });
+    if(ORG) watchEntries();
     if(ORG) checkIfAdmin(uid).then(function(){ paint(); });
     if(tok) return F.getDoc(F.doc(db, "regs", code, "entries", tok)).then(function(d){ mine = d.exists() ? d.data() : null; if(!mine) tok = ""; return (!mine ? Promise.resolve(null) : regLoadPrivate(F, db, code, tok).then(function(pv){ privMine = pv; privTried = tok; privLoaded = true; }, function(){ privTried = tok; privLoaded = false; })); }).then(function(){ paint(); });
   }).catch(function(e){ fail("Could not connect (" + (e && e.message || e) + "). Check your signal and reload."); });
   window.SSREG = { get state(){ return { reg: reg, counts: counts, mine: mine, tok: tok, msg: msg, uid: uid, org: ORG, orgEntries: orgEntries, hasPrivate: !!(privMine && (privMine.idNumber || privMine.cell)), isAdmin: !!admin.uid, privCount: admin.map ? Object.keys(admin.map).length : 0 }; } };
+  var dir = { err: "", busy: false, unsubEnt: null };
+  function hostUidOf(d){ return String(d && d.hostUid || ""); }
+  function isOrgNow(){ if(!reg) return false; var h = hostUidOf(reg); return h ? h === uid : reg.createdBy === uid; }
+  function hostHeldMsg(d){ var n = String(d && d.hostName || "").trim(); return "This already has a main phone" + (n ? " (" + n + ")" : " (another director)") + ". They keep it until they release it. There is no mid-shoot handover."; }
+  function watchEntries(){
+    if(dir.unsubEnt){ try{ dir.unsubEnt(); }catch(e){} dir.unsubEnt = null; }
+    dir.unsubEnt = F.onSnapshot(F.collection(db, "regs", code, "entries"), function(q){ orgEntries = q.docs.map(function(d){ var e = d.data(); e.tok = d.id; return e; }); orgErr = ""; paint(); }, function(){ orgEntries = null; orgErr = "This page can only list the entries once this phone is the organiser (the phone that created the registration, or a signed-in match director who has taken it)."; paint(); });
+  }
+  function directorTake(){
+    return F.getDoc(F.doc(db, "hosts", uid)).then(function(d){
+      if(!d.exists()) throw new Error("That account is not on the match director list.");
+      if(hostUidOf(reg) && hostUidOf(reg) !== uid) throw new Error(hostHeldMsg(reg));
+      var nm = String((auth.currentUser && auth.currentUser.email) || "").split("@")[0].slice(0, 80);
+      var job = hostUidOf(reg) === uid ? Promise.resolve() : F.setDoc(F.doc(db, "regs", code), Object.assign({}, reg, { hostUid: uid, hostName: nm, hostAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+      return job.then(function(){ watchEntries(); return checkIfAdmin(uid); });
+    });
+  }
+  function directorSignIn(email, pw){
+    return FB.auth.signInWithEmailAndPassword(auth, email, pw).then(function(c){
+      uid = c.user.uid;
+      return directorTake();
+    });
+  }
   /* organiser view (?org=1): indemnity form. ID/cell pre-fill and purge need a club admin sign-in. */
   function checkIfAdmin(id){
+
     if(!id || !F) return Promise.resolve(false);
     return F.getDoc(F.doc(db, "admins", id)).then(function(d){
       if(!d.exists()) return false;
@@ -319,7 +343,19 @@ function indemPrint(reg, entries, perSquad, priv){
   }
   function orgCard(){
     if(!ORG) return "";
-    if(reg.createdBy !== uid || orgErr) return '<div class="card msg warn"><b>Organiser: indemnity forms</b><br>' + esc(orgErr || "Open this from the phone that created the registration in Spectre Scoring (Match → Shooter registration).") + '</div>';
+    if(!isOrgNow() || orgErr){
+      var held = !!(reg && hostUidOf(reg) && hostUidOf(reg) !== uid);
+      var h0 = '<div class="card msg warn"><b>Organiser: indemnity forms</b><br>';
+      if(held) h0 += esc(hostHeldMsg(reg));
+      else {
+        h0 += 'This registration was created on another phone, or this browser is not the organiser. A listed match director can take it for the day. ID and cell numbers still need a club admin sign-in.</p>';
+        if(dir.err) h0 += '<div class="msg err">' + esc(dir.err) + '</div>';
+        h0 += '<label for="dirEmail">Director email</label><input id="dirEmail" type="email" autocomplete="username">';
+        h0 += '<label for="dirPw">Password</label><input id="dirPw" type="password" autocomplete="current-password">';
+        h0 += '<button type="button" id="dirInB" style="margin-top:8px">Sign in and take as director</button>';
+      }
+      return h0 + '</div>';
+    }
     var act = (orgEntries || []).filter(function(x){ return x.status === "active"; }).length;
     var nPriv = admin.map ? Object.keys(admin.map).length : 0;
     var h = '<div class="card"><h2>Organiser: indemnity forms</h2><p class="small muted">The club\'s Range Booking Register &amp; Indemnity Form with the date, match, squad, member numbers and names filled in (' + act + ' active entr' + (act === 1 ? "y" : "ies") + ', plus a blank sheet for walk-ins). Signatures are left blank.';
@@ -348,6 +384,11 @@ function indemPrint(reg, entries, perSquad, priv){
       if(!email || !pw){ admin.err = "Enter the admin email and password."; paint(); return; }
       admin.busy = true; ib.disabled = true; ib.textContent = "Signing in…";
       adminSignIn(email, pw).then(function(){ admin.busy = false; paint(); }, function(e){ admin.busy = false; admin.err = /user-not-found|wrong-password|invalid-credential|invalid-email/i.test(String(e && e.code || e && e.message || e)) ? "That email and password do not match an admin account." : (e && e.message || String(e)); paint(); }); };
+    var dbn = document.getElementById("dirInB");
+    if(dbn) dbn.onclick = function(){ if(dir.busy) return; var email = val("dirEmail"), pw = (document.getElementById("dirPw") || {}).value || "";
+      if(!email || !pw){ dir.err = "Enter the director email and password."; paint(); return; }
+      dir.busy = true; dbn.disabled = true; dbn.textContent = "Signing in…";
+      directorSignIn(email, pw).then(function(){ dir.busy = false; dir.err = ""; paint(); }, function(e){ dir.busy = false; dir.err = /not on the match director list|already has a main phone/.test(String(e && e.message || e)) ? (e.message || String(e)) : /invalid-credential|wrong-password|user-not-found|invalid-email/i.test(String(e && e.code || e && e.message || e)) ? "That email and password do not match a club login." : (e && e.message || String(e)); paint(); }); };
     var pb = document.getElementById("purgePrivB");
     if(pb) pb.onclick = async function(){
       if(!admin.uid) return;
